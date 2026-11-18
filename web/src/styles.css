@@ -294,6 +294,8 @@ a {
   display: flex;
   flex-direction: column;
   overflow: auto;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .folder-tree-title {
