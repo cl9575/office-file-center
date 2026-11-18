@@ -22,7 +22,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           colorInfoBorder: '#d8e6f8',
           colorInfoText: '#245a96',
           colorLink: '#3a79bc',
-          colorTextBase: '#26282b',
+          colorTextBase: '#171a1e',
+          colorText: '#171a1e',
+          colorTextSecondary: '#4f5761',
+          colorTextTertiary: '#6b7480',
+          colorTextQuaternary: '#9aa2ac',
+          colorTextPlaceholder: '#8b939d',
           colorBorder: '#e6e8eb',
           colorBorderSecondary: '#ebedf0',
           borderRadius: 9,
@@ -32,7 +37,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         },
         components: {
           Layout: { headerBg: '#ffffff', siderBg: '#f9fafc' },
-          Table: { headerBg: '#f2f5f9', headerColor: '#63707f' },
+          Table: { headerBg: '#f2f5f9', headerColor: '#4a5562' },
           Button: { controlHeight: 36 },
         },
       }}

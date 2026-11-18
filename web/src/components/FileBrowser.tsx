@@ -57,8 +57,27 @@ const { Text } = Typography
 
 interface MoveTreeNode {
   title: string
+  fullPath: string
   value: string
   children: MoveTreeNode[]
+}
+
+function movePathLabel(path?: string) {
+  const parts = (path || '').split('/').filter(Boolean)
+  return parts.length ? `全部项目 / ${parts.join(' / ')}` : '全部项目'
+}
+
+function moveExpandedKeys(folders: NodeItem[], parentId: string) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const chain: string[] = []
+  const seen = new Set<string>()
+  let current = parentId
+  while (current && !seen.has(current)) {
+    seen.add(current)
+    chain.push(current)
+    current = byId.get(current)?.parent_id || ''
+  }
+  return ['__root__', ...chain.reverse()]
 }
 
 export interface FileBrowserHandle {
@@ -132,6 +151,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
   const [moveTarget, setMoveTarget] = useState<NodeItem | null>(null)
   const [moveParent, setMoveParent] = useState('')
   const [moveFolders, setMoveFolders] = useState<NodeItem[]>([])
+  const [moveFoldersReady, setMoveFoldersReady] = useState(false)
   const [saving, setSaving] = useState(false)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const uploaderRef = useRef<UploaderHandle>(null)
@@ -237,10 +257,17 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     setMoveTarget(node)
     setMoveParent(node.parent_id || "__root__")
     setMoveFolders([])
+    setMoveFoldersReady(false)
     api
       .folderTree()
-      .then(setMoveFolders)
-      .catch((err) => message.error(err instanceof Error ? err.message : '无法读取目录'))
+      .then((folders) => {
+        setMoveFolders(folders)
+        setMoveFoldersReady(true)
+      })
+      .catch((err) => {
+        message.error(err instanceof Error ? err.message : '无法读取目录')
+        setMoveFoldersReady(true)
+      })
   }
 
   async function moveNode() {
@@ -464,11 +491,17 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     const build = (parent: string): MoveTreeNode[] =>
       (byParent.get(parent) || []).map((folder) => ({
         title: folder.name,
+        fullPath: movePathLabel(folder.path),
         value: folder.id,
         children: build(folder.id),
       }))
-    return [{ title: '全部项目（根目录）', value: '__root__', children: build('') }]
+    return [{ title: '全部项目（根目录）', fullPath: '全部项目', value: '__root__', children: build('') }]
   }, [moveFolders, moveTarget])
+
+  const moveInitialExpandedKeys = useMemo(
+    () => moveExpandedKeys(moveFolders, moveTarget?.parent_id || ''),
+    [moveFolders, moveTarget],
+  )
 
   const crumbItems: BreadcrumbProps['items'] = crumbs.map((crumb, index) => ({
     title:
@@ -756,16 +789,25 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         <div style={{ marginBottom: 10 }}>
           <Text type="secondary">选择目标文件夹：</Text>
         </div>
-        <TreeSelect
-          style={{ width: '100%' }}
-          value={moveParent}
-          treeData={moveTreeData}
-          treeDefaultExpandAll
-          showSearch
-          treeNodeFilterProp="title"
-          onChange={(value) => setMoveParent(value)}
-          placeholder="选择目标文件夹"
-        />
+        {moveTarget ? (
+          moveFoldersReady ? (
+            <TreeSelect
+              style={{ width: '100%' }}
+              value={moveParent}
+              treeData={moveTreeData}
+              treeDefaultExpandedKeys={moveInitialExpandedKeys}
+              treeNodeLabelProp="fullPath"
+              showSearch
+              treeNodeFilterProp="title"
+              onChange={(value) => setMoveParent(value)}
+              placeholder="选择目标文件夹"
+            />
+          ) : (
+            <div style={{ padding: '8px 0' }}>
+              <Spin size="small" />
+            </div>
+          )
+        ) : null}
       </Modal>
 
       <ContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />

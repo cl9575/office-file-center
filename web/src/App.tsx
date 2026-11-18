@@ -313,7 +313,7 @@ function Shell({
       </Header>
 
       <Layout className="app-body">
-        <Sider width={252} theme="light" className="app-sider">
+        <Sider width={305} theme="light" className="app-sider">
           {isAdminArea ? (
             <div className="admin-nav">
               <div className="folder-tree-title">管理后台</div>
