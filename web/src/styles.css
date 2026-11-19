@@ -541,14 +541,14 @@ a {
   border-bottom: 1px solid #ebedf0;
   font-weight: 600;
   font-size: 12.5px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .file-table .ant-table.ant-table-middle .ant-table-tbody > tr > td.ant-table-cell {
   border-bottom: 1px solid #eff0f2;
-  padding-top: 9px;
-  padding-bottom: 9px;
+  padding-top: 3.5px;
+  padding-bottom: 3.5px;
 }
 
 .file-table .ant-table-tbody > tr {
