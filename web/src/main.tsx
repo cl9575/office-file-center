@@ -33,7 +33,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           borderRadius: 9,
           fontFamily:
             '"Segoe UI", "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif',
-          colorBgLayout: '#f6f8fc',
+          colorBgLayout: '#fbfcfe',
         },
         components: {
           Layout: { headerBg: '#ffffff', siderBg: '#f9fafc' },

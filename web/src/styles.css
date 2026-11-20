@@ -10,7 +10,7 @@ body,
 
 body {
   margin: 0;
-  background: #f6f8fc;
+  background: #fbfcfe;
   color: #171a1e;
   font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -31,7 +31,7 @@ a {
   align-items: center;
   justify-content: center;
   gap: 18px;
-  background: radial-gradient(circle at 30% 20%, #f1f4f9 0, #fafbfe 45%, #f6f8fc 100%);
+  background: radial-gradient(circle at 30% 20%, #f9fbfe 0, #ffffff 45%, #fbfcfe 100%);
 }
 
 .boot-logo {
@@ -53,9 +53,9 @@ a {
   display: grid;
   place-items: center;
   background:
-    radial-gradient(circle at 12% 10%, rgba(58, 121, 188, 0.16), transparent 42%),
-    radial-gradient(circle at 86% 88%, rgba(150, 170, 190, 0.12), transparent 40%),
-    linear-gradient(160deg, #f2f6fc, #fafbfe 55%, #f1f6fc);
+    radial-gradient(circle at 12% 10%, rgba(58, 121, 188, 0.07), transparent 42%),
+    radial-gradient(circle at 86% 88%, rgba(150, 170, 190, 0.06), transparent 40%),
+    linear-gradient(160deg, #fbfcfe, #ffffff 55%, #fafcfe);
 }
 
 .auth-card {
@@ -279,7 +279,7 @@ a {
   border-right: 1px solid #e8eaed;
   padding: 18px 12px 14px;
   overflow: hidden;
-  background: linear-gradient(180deg, #fafbfd 0%, #f4f7fa 100%);
+  background: linear-gradient(180deg, #fdfeff 0%, #fafcfe 100%);
 }
 
 .app-sider .ant-layout-sider-children {
@@ -489,7 +489,7 @@ a {
   padding: 22px 26px 30px;
   overflow: auto;
   min-width: 0;
-  background: #f6f8fc;
+  background: #fbfcfe;
 }
 
 .ant-btn-primary {
@@ -663,6 +663,11 @@ a {
   box-shadow: 0 8px 26px rgba(35, 60, 95, 0.07);
 }
 
+.admin-users-table .ant-table .ant-table-tbody > tr > td.ant-table-cell {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
 .filter-card {
   margin-bottom: 16px;
 }
@@ -720,8 +725,8 @@ a {
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(circle at 20% 10%, rgba(58, 121, 188, 0.16), transparent 45%),
-    linear-gradient(160deg, #f2f6fc, #fafbfe 60%, #f1f6fc);
+    radial-gradient(circle at 20% 10%, rgba(58, 121, 188, 0.07), transparent 45%),
+    linear-gradient(160deg, #fbfcfe, #ffffff 60%, #fafcfe);
 }
 
 .forced-card {
@@ -796,6 +801,7 @@ a {
     padding: 0 14px;
     gap: 12px;
   }
+
 }
 
 .details-drawer .ant-drawer-content-wrapper {

@@ -8,6 +8,7 @@ export interface User {
   role: Role
   is_owner: boolean
   must_change_password: boolean
+  suggest_password_change?: boolean
   disabled: boolean
   created_at: string
 }

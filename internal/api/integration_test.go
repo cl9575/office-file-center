@@ -340,7 +340,7 @@ func TestUploadIdempotencyAndValidation(t *testing.T) {
 	}
 }
 
-func TestUserRolesAndMustChangePassword(t *testing.T) {
+func TestUserRolesAndFirstLoginSuggestion(t *testing.T) {
 	e := newEnv(t)
 	e.setupAdmin()
 	code, body := e.req(e.admin, "POST", "/api/admin/users", map[string]string{
@@ -361,13 +361,30 @@ func TestUserRolesAndMustChangePassword(t *testing.T) {
 	login := decode[struct {
 		User model.User `json:"user"`
 	}](t, body)
-	if !login.User.MustChangePassword {
-		t.Fatalf("new user must change password")
+	if login.User.MustChangePassword {
+		t.Fatalf("new user should not be forced to change password")
+	}
+	if !login.User.SuggestPasswordChange {
+		t.Fatalf("new user should receive a password change suggestion")
 	}
 
-	code, body = e.req(viewer, "PUT", "/api/upload?upload_id="+model.NewID()+"&name=x.txt", nil)
-	if code != http.StatusForbidden {
-		t.Fatalf("upload before password change should be blocked, got %d %s", code, body)
+	code, body = e.req(viewer, "GET", "/api/nodes", nil)
+	if code != http.StatusOK {
+		t.Fatalf("new user should access the app before changing password: %d %s", code, body)
+	}
+
+	second := newClient()
+	code, body = e.req(second, "POST", "/api/auth/login", map[string]string{
+		"username": "viewer1", "password": "viewer-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("viewer second login: %d %s", code, body)
+	}
+	secondLogin := decode[struct {
+		User model.User `json:"user"`
+	}](t, body)
+	if secondLogin.User.SuggestPasswordChange || secondLogin.User.MustChangePassword {
+		t.Fatalf("password suggestion should only appear on first login: %+v", secondLogin.User)
 	}
 
 	code, body = e.req(viewer, "POST", "/api/auth/change-password", map[string]string{
@@ -408,6 +425,64 @@ func TestUserRolesAndMustChangePassword(t *testing.T) {
 
 func (e *env) createFolderAPI(client *http.Client, parent, name string) (int, []byte) {
 	return e.req(client, "POST", "/api/nodes", map[string]string{"parent_id": parent, "name": name})
+}
+
+func TestAdminResetStillRequiresPasswordChange(t *testing.T) {
+	e := newEnv(t)
+	e.setupAdmin()
+
+	code, body := e.req(e.admin, "POST", "/api/admin/users", map[string]string{
+		"username": "resetuser", "display_name": "重置测试", "password": "reset-pass-123", "role": "editor",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create reset user: %d %s", code, body)
+	}
+	user := decode[model.User](t, body)
+
+	first := newClient()
+	code, body = e.req(first, "POST", "/api/auth/login", map[string]string{
+		"username": "resetuser", "password": "reset-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("reset user first login: %d %s", code, body)
+	}
+
+	code, body = e.req(e.admin, "POST", "/api/admin/users/"+user.ID+"/reset-password", map[string]string{
+		"password": "reset-next-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("admin reset password: %d %s", code, body)
+	}
+
+	afterReset := newClient()
+	code, body = e.req(afterReset, "POST", "/api/auth/login", map[string]string{
+		"username": "resetuser", "password": "reset-next-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("login after reset: %d %s", code, body)
+	}
+	resetLogin := decode[struct {
+		User model.User `json:"user"`
+	}](t, body)
+	if !resetLogin.User.MustChangePassword || resetLogin.User.SuggestPasswordChange {
+		t.Fatalf("reset account should be forced to change password without a suggestion: %+v", resetLogin.User)
+	}
+
+	code, body = e.req(afterReset, "GET", "/api/nodes", nil)
+	if code != http.StatusForbidden || decode[errorPayload](t, body).Error.Code != "PASSWORD_CHANGE_REQUIRED" {
+		t.Fatalf("reset account should be blocked until password change: %d %s", code, body)
+	}
+
+	code, body = e.req(afterReset, "POST", "/api/auth/change-password", map[string]string{
+		"old_password": "reset-next-pass-123", "new_password": "reset-final-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("change password after reset: %d %s", code, body)
+	}
+	code, body = e.req(afterReset, "GET", "/api/nodes", nil)
+	if code != http.StatusOK {
+		t.Fatalf("reset account should access app after password change: %d %s", code, body)
+	}
 }
 
 func TestOwnerDeletesUserKeepsHistory(t *testing.T) {
@@ -616,6 +691,85 @@ func TestOwnerAccountProtection(t *testing.T) {
 	}](t, body)
 	if !list.Items[0].IsOwner || list.Items[0].ID != owner.ID {
 		t.Fatalf("owner should remain first in list: %+v", list.Items)
+	}
+}
+
+func TestAdminCannotChangeOwnRoleOrManagePeer(t *testing.T) {
+	e := newEnv(t)
+	e.setupAdmin()
+
+	createUser := func(username, displayName, password, role string) model.User {
+		t.Helper()
+		code, body := e.req(e.admin, "POST", "/api/admin/users", map[string]string{
+			"username": username, "display_name": displayName, "password": password, "role": role,
+		})
+		if code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", username, code, body)
+		}
+		return decode[model.User](t, body)
+	}
+
+	admin2User := createUser("admin2", "第二管理员", "admin2-pass-123", "admin")
+	admin3User := createUser("admin3", "第三管理员", "admin3-pass-123", "admin")
+	editorUser := createUser("editor1", "编辑同事", "editor-pass-123", "editor")
+
+	admin2 := newClient()
+	code, body := e.req(admin2, "POST", "/api/auth/login", map[string]string{
+		"username": "admin2", "password": "admin2-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("second admin login: %d %s", code, body)
+	}
+
+	code, body = e.req(admin2, "PATCH", "/api/admin/users/"+admin2User.ID, map[string]any{
+		"display_name": "第二管理员改名", "role": "admin", "disabled": false,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("admin renaming self: %d %s", code, body)
+	}
+
+	code, body = e.req(admin2, "PATCH", "/api/admin/users/"+admin2User.ID, map[string]any{
+		"display_name": "第二管理员改名", "role": "editor", "disabled": false,
+	})
+	if code != http.StatusBadRequest || decode[errorPayload](t, body).Error.Code != "SELF_ROLE" {
+		t.Fatalf("admin changing own role should fail: %d %s", code, body)
+	}
+	code, body = e.req(admin2, "GET", "/api/admin/users", nil)
+	if code != http.StatusOK {
+		t.Fatalf("admin should keep admin access after rejected self role change: %d %s", code, body)
+	}
+
+	code, body = e.req(admin2, "PATCH", "/api/admin/users/"+admin3User.ID, map[string]any{
+		"display_name": "被同级改名", "role": "admin", "disabled": false,
+	})
+	if code != http.StatusForbidden || decode[errorPayload](t, body).Error.Code != "SAME_LEVEL" {
+		t.Fatalf("admin editing peer admin should fail: %d %s", code, body)
+	}
+	code, body = e.req(admin2, "POST", "/api/admin/users/"+admin3User.ID+"/reset-password", map[string]string{
+		"password": "peer-reset-123",
+	})
+	if code != http.StatusForbidden || decode[errorPayload](t, body).Error.Code != "SAME_LEVEL" {
+		t.Fatalf("admin resetting peer admin password should fail: %d %s", code, body)
+	}
+
+	code, body = e.req(admin2, "PATCH", "/api/admin/users/"+editorUser.ID, map[string]any{
+		"display_name": "编辑同事二", "role": "editor", "disabled": false,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("admin updating lower-level user: %d %s", code, body)
+	}
+
+	code, body = e.req(e.admin, "PATCH", "/api/admin/users/"+admin3User.ID, map[string]any{
+		"display_name": "第三管理员改名", "role": "admin", "disabled": false,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("owner updating peer admin: %d %s", code, body)
+	}
+	code, body = e.req(e.admin, "POST", "/api/admin/users/"+admin3User.ID+"/reset-password", map[string]string{
+		"password": "admin3-next-pass-123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("owner resetting peer admin password: %d %s", code, body)
 	}
 }
 

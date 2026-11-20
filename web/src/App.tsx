@@ -7,6 +7,7 @@ import {
   Input,
   Layout,
   Menu,
+  Modal,
   Result,
   Space,
   Spin,
@@ -174,7 +175,7 @@ export default function App() {
         <div className="forced-card">
           <div className="boot-logo"><LockOutlined /></div>
           <h2>请先设置新密码</h2>
-          <p>管理员为你设置了初始密码。为了账号安全，修改后才能进入文件中心。</p>
+          <p>管理员重置了你的密码。为了账号安全，修改后才能进入文件中心。</p>
           <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()}>退出登录</Button>
         </div>
         <ChangePasswordModal
@@ -219,6 +220,9 @@ function Shell({
   const [treeVersion, setTreeVersion] = useState(0)
   const [newFolderSignal, setNewFolderSignal] = useState(0)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [passwordSuggestionOpen, setPasswordSuggestionOpen] = useState(
+    user.suggest_password_change === true,
+  )
   const browserRef = useRef<FileBrowserHandle>(null)
 
   const isAdminArea = location.pathname.startsWith('/admin')
@@ -435,6 +439,22 @@ function Shell({
           </Routes>
         </Content>
       </Layout>
+
+      <Modal
+        open={passwordSuggestionOpen}
+        title="建议修改初始密码"
+        okText="现在修改"
+        cancelText="稍后再说"
+        onOk={() => {
+          setPasswordSuggestionOpen(false)
+          setPasswordOpen(true)
+        }}
+        onCancel={() => setPasswordSuggestionOpen(false)}
+      >
+        <p style={{ margin: 0, lineHeight: 1.8 }}>
+          你正在使用管理员设置的初始密码。为了账号安全，建议尽快改为只有你知道的密码；也可以稍后在右上角菜单中修改。
+        </p>
+      </Modal>
 
       <ChangePasswordModal
         open={passwordOpen}

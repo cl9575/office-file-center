@@ -2,7 +2,7 @@
 
 面向十几人办公室的局域网文件版本管理平台。文件集中保存在一台长期开机的 Windows 主机上，员工用 Edge 或 Chrome 浏览器访问，不需要安装客户端。
 
-当前版本：**0.2.6**（文件列表行高压缩约 20%，同屏显示更多文件）
+当前版本：**0.2.8**（用户管理权限限制；新账号首次登录改为一次修改建议；文件列表行高约 44px）
 
 ## 界面预览
 
@@ -88,7 +88,7 @@ docs/                    管理员、员工、维护文档与更新日志
 
 ## 主机部署
 
-1. 在 GitHub Releases 下载 `LanFilePlatform-0.2.6-public.zip`，解压到主机。
+1. 在 GitHub Releases 下载 `LanFilePlatform-0.2.8-public.zip`，解压到主机。
 2. 双击 `安装.cmd`，按提示填写数据目录和端口。默认数据目录 `D:\LanFileData`，默认端口 `9443`。
 3. 打开 `https://localhost:9443` 或 `https://<主机IP>:9443`，创建初始管理员。
 4. 在「管理后台 → 备份与系统」配置独立备份目录，并做一次手动备份。
@@ -160,10 +160,10 @@ npm run build
 ## 构建发布包
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\build.ps1 -Version 0.2.6
+powershell -ExecutionPolicy Bypass -File .\installer\build.ps1 -Version 0.2.8
 ```
 
-输出：`release\LanFilePlatform-0.2.6.zip`。解压后在主机双击 `安装.cmd`。
+输出：`release\LanFilePlatform-0.2.8.zip`。解压后在主机双击 `安装.cmd`。
 
 > 构建脚本中的 `SERVER` 示例地址为 `https://192.168.1.100:9443`，发布前请改成主机实际 IP，或在生成的 `一键信任证书.cmd` 中传入服务器地址。
 
@@ -196,4 +196,4 @@ powershell -ExecutionPolicy Bypass -File .\installer\build.ps1 -Version 0.2.6
 
 - 本仓库为公开版本，内网 IP、本机用户名和路径已脱敏；示例地址 `192.168.1.100` 仅用于说明，请替换为主机实际 IP。
 - 含真实账号姓名的界面截图和 Word 手册未上传到公开仓库。
-- 当前版本 0.2.6，发布包和可执行文件见 GitHub Releases。
+- 当前版本 0.2.8，发布包和可执行文件见 GitHub Releases。

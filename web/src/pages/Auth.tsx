@@ -192,7 +192,7 @@ export function ChangePasswordModal({
   return (
     <Modal
       open={open}
-      title={forced ? '首次登录：请设置新密码' : '修改密码'}
+      title={forced ? '密码已重置：请设置新密码' : '修改密码'}
       okText="确认修改"
       cancelText="取消"
       confirmLoading={loading}
@@ -223,7 +223,7 @@ export function ChangePasswordModal({
         <Alert
           type="info"
           showIcon
-          message="为了账号安全，请先修改管理员分配的初始密码。修改成功后即可开始使用。"
+          message="管理员重置了你的密码。为了账号安全，请先设置新密码，修改成功后才能继续使用。"
           style={{ marginBottom: 20 }}
         />
       )}

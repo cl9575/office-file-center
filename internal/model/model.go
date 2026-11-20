@@ -24,18 +24,21 @@ type User struct {
 	Role               string `json:"role"`
 	IsOwner            bool   `json:"is_owner"`
 	MustChangePassword bool   `json:"must_change_password"`
-	Disabled           bool   `json:"disabled"`
-	CreatedAt          string `json:"created_at"`
+	// 仅登录响应携带，用于提示一次修改初始密码，不持久化。
+	SuggestPasswordChange bool   `json:"suggest_password_change,omitempty"`
+	Disabled              bool   `json:"disabled"`
+	CreatedAt             string `json:"created_at"`
 }
 
 type Actor struct {
 	ID          string
 	DisplayName string
 	Role        string
+	IsOwner     bool
 }
 
 func (u User) Actor() Actor {
-	return Actor{ID: u.ID, DisplayName: u.DisplayName, Role: u.Role}
+	return Actor{ID: u.ID, DisplayName: u.DisplayName, Role: u.Role, IsOwner: u.IsOwner}
 }
 
 func (u User) IsAdmin() bool { return u.Role == RoleAdmin }

@@ -171,11 +171,11 @@ func (s *Service) Login(username, password, ip, userAgent string) (model.User, s
 		return model.User{}, "", err
 	}
 	var rec userRecord
-	var mustChange, disabled, owner int
+	var mustChange, firstLogin, disabled, owner int
 	err := s.DB.QueryRow(`SELECT id, username, display_name, role, password_hash,
-		is_owner, must_change_password, disabled, created_at FROM users WHERE username = ? AND deleted_at = ''`, username).
+		is_owner, must_change_password, first_login, disabled, created_at FROM users WHERE username = ? AND deleted_at = ''`, username).
 		Scan(&rec.ID, &rec.Username, &rec.DisplayName, &rec.Role, &rec.PasswordHash,
-			&owner, &mustChange, &disabled, &rec.CreatedAt)
+			&owner, &mustChange, &firstLogin, &disabled, &rec.CreatedAt)
 	if err == sql.ErrNoRows || (err == nil && !VerifyPassword(rec.PasswordHash, password)) {
 		s.limiter.Fail(key)
 		return model.User{}, "", apperr.Unauthorized("用户名或密码错误")
@@ -196,14 +196,31 @@ func (s *Service) Login(username, password, ip, userAgent string) (model.User, s
 		return model.User{}, "", err
 	}
 	now := time.Now().UTC()
-	_, err = s.DB.Exec(`INSERT INTO sessions(token_hash, user_id, created_at, expires_at, ip, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		tokenHash(token), rec.ID,
-		now.Format(model.TimeFormat),
-		now.Add(sessionLifetime).Format(model.TimeFormat), ip, userAgent)
+	suggest := firstLogin == 1 && mustChange == 0
+	tx, err := s.DB.Begin()
 	if err != nil {
 		return model.User{}, "", err
 	}
+	defer tx.Rollback()
+	if suggest {
+		result, err := tx.Exec(`UPDATE users SET first_login = 0 WHERE id = ? AND first_login = 1`, rec.ID)
+		if err != nil {
+			return model.User{}, "", err
+		}
+		affected, _ := result.RowsAffected()
+		suggest = affected > 0
+	}
+	if _, err := tx.Exec(`INSERT INTO sessions(token_hash, user_id, created_at, expires_at, ip, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		tokenHash(token), rec.ID,
+		now.Format(model.TimeFormat),
+		now.Add(sessionLifetime).Format(model.TimeFormat), ip, userAgent); err != nil {
+		return model.User{}, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.User{}, "", err
+	}
+	rec.SuggestPasswordChange = suggest
 	_, _ = s.DB.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, model.Now())
 	return rec.User, token, nil
 }
@@ -265,7 +282,7 @@ func (s *Service) ChangePassword(userID, oldPassword, newPassword string) (strin
 		return "", err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?`,
+	if _, err := tx.Exec(`UPDATE users SET password_hash = ?, must_change_password = 0, first_login = 0, updated_at = ? WHERE id = ?`,
 		newHash, model.Now(), userID); err != nil {
 		return "", err
 	}
@@ -338,16 +355,15 @@ func (s *Service) CreateUser(actor model.Actor, username, displayName, password,
 	id := model.NewID()
 	now := model.Now()
 	_, err = s.DB.Exec(`INSERT INTO users
-		(id, username, display_name, password_hash, role, is_owner, must_change_password, disabled, created_at, updated_at, created_by)
-		VALUES (?, ?, ?, ?, ?, 0, 1, 0, ?, ?, ?)`, id, username, displayName, hash, role, now, now, actor.ID)
+		(id, username, display_name, password_hash, role, is_owner, must_change_password, first_login, disabled, created_at, updated_at, created_by)
+		VALUES (?, ?, ?, ?, ?, 0, 0, 1, 0, ?, ?, ?)`, id, username, displayName, hash, role, now, now, actor.ID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return model.User{}, apperr.Conflict("USERNAME_EXISTS", "用户名已存在")
 		}
 		return model.User{}, err
 	}
-	return model.User{ID: id, Username: username, DisplayName: displayName, Role: role,
-		MustChangePassword: true, CreatedAt: now}, nil
+	return model.User{ID: id, Username: username, DisplayName: displayName, Role: role, CreatedAt: now}, nil
 }
 
 func (s *Service) UpdateUser(actor model.Actor, id, displayName, role string, disabled bool) (model.User, error) {
@@ -382,6 +398,12 @@ func (s *Service) UpdateUser(actor model.Actor, id, displayName, role string, di
 			return model.User{}, apperr.BadRequest("OWNER_LOCKED", "主机账号必须保持管理员角色且不能停用")
 		}
 	}
+	if actor.ID == id && role != currentRole {
+		return model.User{}, apperr.BadRequest("SELF_ROLE", "不能修改自己的权限等级")
+	}
+	if currentOwner == 0 && actor.ID != id && currentRole == actor.Role && !actor.IsOwner {
+		return model.User{}, apperr.New(403, "SAME_LEVEL", "不能编辑同级账号；如需调整请联系主机账号")
+	}
 	if currentRole == model.RoleAdmin && (role != model.RoleAdmin || disabled) {
 		var admins int
 		if err := tx.QueryRow(`SELECT COUNT(1) FROM users WHERE role = 'admin' AND disabled = 0`).Scan(&admins); err != nil {
@@ -411,7 +433,8 @@ func (s *Service) ResetPassword(actor model.Actor, id, newPassword string) error
 		return err
 	}
 	var owner int
-	if err := s.DB.QueryRow(`SELECT is_owner FROM users WHERE id = ? AND deleted_at = ''`, id).Scan(&owner); err != nil {
+	var targetRole string
+	if err := s.DB.QueryRow(`SELECT is_owner, role FROM users WHERE id = ? AND deleted_at = ''`, id).Scan(&owner, &targetRole); err != nil {
 		if err == sql.ErrNoRows {
 			return apperr.NotFound("账号不存在")
 		}
@@ -419,6 +442,9 @@ func (s *Service) ResetPassword(actor model.Actor, id, newPassword string) error
 	}
 	if owner == 1 && actor.ID != id {
 		return apperr.Forbidden("主机账号的密码只能由本人重置")
+	}
+	if owner == 0 && actor.ID != id && targetRole == actor.Role && !actor.IsOwner {
+		return apperr.New(403, "SAME_LEVEL", "不能重置同级账号的密码；如需操作请联系主机账号")
 	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {

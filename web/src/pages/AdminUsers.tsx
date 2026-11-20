@@ -85,7 +85,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
         password: values.password,
         role: values.role,
       })
-      message.success('账号已创建，请将初始密码告知对方')
+      message.success('账号已创建，请将初始密码告知对方；首次登录会提示修改密码')
       setCreateOpen(false)
       createForm.resetFields()
       await load()
@@ -196,10 +196,15 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
       title: '操作',
       key: 'actions',
       width: 250,
-      render: (_, row) =>
-        row.is_owner && row.id !== currentUser.id ? (
-          <span className="muted">仅主机账号本人可维护</span>
-        ) : (
+      render: (_, row) => {
+        const isSelf = row.id === currentUser.id
+        if (row.is_owner && !isSelf) {
+          return <span className="muted">仅主机账号本人可维护</span>
+        }
+        if (!isSelf && !currentUser.is_owner && row.role === currentUser.role) {
+          return <span className="muted">同级账号仅主机账号可维护</span>
+        }
+        return (
           <Space size={0}>
             <Button type="link" size="small" icon={<EditOutlined />} onClick={() => setEditing(row)}>
               编辑
@@ -207,7 +212,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
             <Button type="link" size="small" icon={<KeyOutlined />} onClick={() => setResetting(row)}>
               重置密码
             </Button>
-            {currentUser.is_owner && !row.is_owner && row.id !== currentUser.id && (
+            {currentUser.is_owner && !row.is_owner && !isSelf && (
               <Button
                 type="link"
                 size="small"
@@ -219,7 +224,8 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
               </Button>
             )}
           </Space>
-        ),
+        )
+      },
     },
   ]
 
@@ -239,9 +245,9 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
         showIcon
         style={{ marginBottom: 18 }}
         message="角色说明"
-        description="管理员：账号、备份、回收站及全部编辑权限；编辑者：上传、更新、重命名、移动和删除文件；只读者：浏览、搜索、下载与查看历史。所有权限均由服务器校验。主机账号为初始化时创建的账号，只能由本人维护，其他管理员不能修改或重置；主机账号还可以删除其他账号，删除后历史记录保留。"
+        description="管理员：账号、备份、回收站及全部编辑权限；编辑者：上传、更新、重命名、移动和删除文件；只读者：浏览、搜索、下载与查看历史。所有权限均由服务器校验。任何人都不能修改自己的权限等级；非主机管理员不能编辑或重置同级管理员。主机账号为初始化时创建的账号，只能由本人维护，其他管理员不能修改或重置；主机账号还可以删除其他账号，删除后历史记录保留。"
       />
-      <Table rowKey="id" columns={columns} dataSource={users} loading={loading} pagination={false} />
+      <Table className="admin-users-table" rowKey="id" columns={columns} dataSource={users} loading={loading} pagination={false} />
 
       <Modal
         title="新建账号"
@@ -324,7 +330,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
           </Form.Item>
           <Form.Item name="role" label="角色" rules={[{ required: true }]}>
             <Select
-              disabled={!!editing?.is_owner}
+              disabled={!!editing?.is_owner || editing?.id === currentUser.id}
               options={[
                 { value: 'admin', label: '管理员' },
                 { value: 'editor', label: '编辑者' },
@@ -343,9 +349,12 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
             <span className="muted">主机账号固定为管理员，不能降级或停用。</span>
           )}
           {editing?.id === currentUser.id && !editing?.is_owner && (
-            <Tooltip title="不能停用当前登录的账号">
-              <span className="muted">当前登录账号不能被停用。</span>
-            </Tooltip>
+            <Space direction="vertical" size={2}>
+              <span className="muted">不能修改自己的权限等级。</span>
+              <Tooltip title="不能停用当前登录的账号">
+                <span className="muted">当前登录账号不能被停用。</span>
+              </Tooltip>
+            </Space>
           )}
         </Form>
       </Modal>
