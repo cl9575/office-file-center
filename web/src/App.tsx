@@ -226,7 +226,7 @@ function Shell({
   const browserRef = useRef<FileBrowserHandle>(null)
 
   const isAdminArea = location.pathname.startsWith('/admin')
-  const isAdmin = user.role === 'admin'
+  const canAccessAdmin = user.role === 'admin' || user.role === 'operator'
 
   const openFolder = useCallback(
     (id: string) => {
@@ -250,7 +250,7 @@ function Shell({
 
   const userMenu: MenuProps['items'] = [
     { key: 'password', icon: <LockOutlined />, label: '修改密码' },
-    ...(isAdmin ? [{ key: 'admin', icon: <SettingOutlined />, label: isAdminArea ? '返回文件' : '管理后台' }] : []),
+    ...(canAccessAdmin ? [{ key: 'admin', icon: <SettingOutlined />, label: isAdminArea ? '返回文件' : '管理后台' }] : []),
     { type: 'divider' as const },
     { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true },
   ]
@@ -283,7 +283,7 @@ function Shell({
           )}
         </div>
         <div className="header-right">
-          {isAdmin && (
+          {canAccessAdmin && (
             <Button
               type={isAdminArea ? 'default' : 'text'}
               icon={isAdminArea ? <FolderOpenOutlined /> : <SettingOutlined />}
@@ -292,7 +292,6 @@ function Shell({
               {isAdminArea ? '返回文件' : '管理后台'}
             </Button>
           )}
-          {isAdminArea && !isAdmin && <Button onClick={() => navigate('/')}>返回文件</Button>}
           <Dropdown
             trigger={['click']}
             menu={{
@@ -332,7 +331,9 @@ function Shell({
             <FolderTree
               selected={folderId}
               version={treeVersion}
-              canEdit={isAdmin || user.role === 'editor'}
+              canEdit={user.role === 'admin' || user.role === 'operator' || user.role === 'editor'}
+              canUploadSecure={user.role === 'admin' || user.role === 'operator'}
+              isOwner={user.is_owner}
               onSelect={openFolder}
               onNewProject={() => {
                 openFolder('')
@@ -362,6 +363,10 @@ function Shell({
                 switch (action) {
                   case 'new-project':
                     openFolder('')
+                    setNewFolderSignal((value) => value + 1)
+                    break
+                  case 'new-folder':
+                    openFolder(folderId)
                     setNewFolderSignal((value) => value + 1)
                     break
                   case 'upload':
@@ -401,20 +406,23 @@ function Shell({
                 />
               }
             />
-            <Route path="/admin" element={isAdmin ? <Navigate to="/admin/users" replace /> : <Navigate to="/" replace />} />
+            <Route
+              path="/admin"
+              element={canAccessAdmin ? <Navigate to="/admin/users" replace /> : <Navigate to="/" replace />}
+            />
             <Route
               path="/admin/users"
-              element={isAdmin ? <AdminUsers currentUser={user} /> : <Navigate to="/" replace />}
+              element={canAccessAdmin ? <AdminUsers currentUser={user} /> : <Navigate to="/" replace />}
             />
             <Route
               path="/admin/recycle"
-              element={isAdmin ? <AdminRecycle settings={settings} /> : <Navigate to="/" replace />}
+              element={canAccessAdmin ? <AdminRecycle settings={settings} /> : <Navigate to="/" replace />}
             />
-            <Route path="/admin/audit" element={isAdmin ? <AdminAudit /> : <Navigate to="/" replace />} />
+            <Route path="/admin/audit" element={canAccessAdmin ? <AdminAudit /> : <Navigate to="/" replace />} />
             <Route
               path="/admin/system"
               element={
-                isAdmin ? (
+                canAccessAdmin ? (
                   <AdminSystem settings={settings} onOpenSettings={() => navigate('/admin/settings')} />
                 ) : (
                   <Navigate to="/" replace />
@@ -424,7 +432,7 @@ function Shell({
             <Route
               path="/admin/settings"
               element={
-                isAdmin ? (
+                canAccessAdmin ? (
                   <AdminSettings
                     onSaved={() => {
                       void refreshMe().catch(() => message.error('刷新设置失败'))

@@ -375,6 +375,66 @@ a {
   color: #171a1e;
 }
 
+.folder-tree-root-node .ant-tree-node-content-wrapper {
+  font-weight: 600;
+}
+
+/* 两个顶级根不占树缩进，子级整体左移一级以保持旧版相对层级。 */
+.folder-tree .folder-tree-root-node > .ant-tree-switcher {
+  display: none;
+}
+
+/* 根行不再叠加 Ant 的 4px 行距，保持 0.2.8 的紧凑间距。 */
+.folder-tree .folder-tree-root-node {
+  margin-bottom: 0 !important;
+}
+
+.folder-tree .folder-tree-root-node > .ant-tree-node-content-wrapper {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 0 0 2px;
+}
+
+.folder-tree .folder-tree-root-node > .ant-tree-node-content-wrapper > .ant-tree-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.folder-tree .ant-tree-indent-unit:first-child {
+  width: 0;
+}
+
+/* 目录树双击展开/收起比 Ant 默认 0.2s 更快，保持操作反馈利落。 */
+.folder-tree .ant-tree .ant-motion-collapse,
+.folder-tree .ant-tree .ant-motion-collapse-legacy-active {
+  transition: height 0.08s cubic-bezier(0.645, 0.045, 0.355, 1),
+    opacity 0.08s cubic-bezier(0.645, 0.045, 0.355, 1) !important;
+}
+
+.folder-tree-root-title {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.folder-tree-root-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tree-root-title .folder-tree-root-add {
+  flex: 0 0 auto;
+  margin-left: auto;
+  margin-right: 4px;
+}
+
 .folder-tree-loading {
   padding: 16px;
   text-align: center;
@@ -806,4 +866,74 @@ a {
 
 .details-drawer .ant-drawer-content-wrapper {
   max-width: 100vw;
+}
+
+.preview-modal {
+  max-width: calc(100vw - 32px);
+}
+
+.preview-body {
+  min-height: 96px;
+}
+
+.preview-loading {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+}
+
+.preview-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  overflow: hidden;
+  background: #f6f8fb;
+  border-radius: 10px;
+}
+
+.preview-media img {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+
+.preview-media video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  background: #111;
+  border-radius: 10px;
+}
+
+.preview-audio {
+  padding: 32px 20px;
+  background: #f6f8fb;
+  border-radius: 10px;
+}
+
+.preview-audio audio {
+  width: 100%;
+}
+
+.preview-text {
+  max-height: 64vh;
+  margin: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid #e7e9ec;
+  border-radius: 10px;
+  background: #f7f8fa;
+  color: #2c333a;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 4;
+}
+
+.preview-alert {
+  margin-bottom: 12px;
 }

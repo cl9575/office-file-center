@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { Empty, Spin, Tooltip, Tree } from 'antd'
+import { Spin, Tooltip, Tree } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   DeleteOutlined,
@@ -9,6 +9,7 @@ import {
   FolderAddOutlined,
   FolderFilled,
   HomeFilled,
+  LockFilled,
   PlusOutlined,
   ProjectFilled,
   ReloadOutlined,
@@ -20,27 +21,37 @@ import { api } from '../api'
 import type { NodeItem } from '../types'
 import { ContextMenu, type ContextMenuState } from './ContextMenu'
 
-let rememberedExpansion: string[] = []
+const MAIN_ROOT_KEY = '__main_root__'
+
+let rememberedExpansion: string[] = [MAIN_ROOT_KEY]
 let hasRememberedExpansion = false
 
 function visibleExpandedKeys(folders: NodeItem[], keys: string[]): string[] {
   const byId = new Map(folders.map((folder) => [folder.id, folder]))
   const expanded = new Set(keys)
-  return keys.filter((key) => {
+  const visible = keys.filter((key) => {
+    if (key === MAIN_ROOT_KEY) return true
     let node = byId.get(key)
     if (!node) return false
-    while (node && node.parent_id) {
-      if (!expanded.has(node.parent_id)) return false
-      node = byId.get(node.parent_id)
+    let parent = node.parent_id
+    while (parent) {
+      if (!expanded.has(parent)) return false
+      node = byId.get(parent)
+      if (!node) return false
+      parent = node.parent_id
     }
-    return true
+    return node.space !== 'main' || expanded.has(MAIN_ROOT_KEY)
   })
+  if (!visible.includes(MAIN_ROOT_KEY)) visible.unshift(MAIN_ROOT_KEY)
+  return visible
 }
 
 export function FolderTree({
   selected,
   version,
   canEdit,
+  canUploadSecure,
+  isOwner,
   onSelect,
   onNewProject,
   onNodeAction,
@@ -49,6 +60,8 @@ export function FolderTree({
   selected: string
   version: number
   canEdit: boolean
+  canUploadSecure: boolean
+  isOwner: boolean
   onSelect: (id: string) => void
   onNewProject: () => void
   onNodeAction: (action: string, node: NodeItem) => void
@@ -79,6 +92,12 @@ export function FolderTree({
     }
   }, [version])
 
+  const secureRoot = useMemo(() => folders.find((folder) => folder.is_zone_root) || null, [folders])
+  const selectedNode = useMemo(
+    () => folders.find((folder) => folder.id === selected) || null,
+    [folders, selected],
+  )
+
   useEffect(() => {
     if (!selected) {
       followedSelection.current = null
@@ -86,13 +105,15 @@ export function FolderTree({
     }
     if (followedSelection.current === selected) return
     const byId = new Map(folders.map((folder) => [folder.id, folder]))
-    if (!byId.has(selected)) return
+    const active = byId.get(selected)
+    if (!active) return
     const ancestors: string[] = []
-    let node = byId.get(selected)
+    let node: NodeItem | undefined = active
     while (node && node.parent_id) {
       ancestors.push(node.parent_id)
       node = byId.get(node.parent_id)
     }
+    if (node?.space === 'main') ancestors.push(MAIN_ROOT_KEY)
     followedSelection.current = selected
     if (!ancestors.length) return
     setExpandedKeys((current) => {
@@ -107,40 +128,115 @@ export function FolderTree({
     })
   }, [selected, folders])
 
-  const treeData = useMemo<DataNode[]>(() => {    const byParent = new Map<string, NodeItem[]>()
+  const treeData = useMemo<DataNode[]>(() => {
+    const byParent = new Map<string, NodeItem[]>()
     folders.forEach((folder) => {
+      if (folder.is_zone_root) return
       const list = byParent.get(folder.parent_id) || []
       list.push(folder)
       byParent.set(folder.parent_id, list)
     })
-    const build = (parent: string, depth: number): DataNode[] =>
-      (byParent.get(parent) || []).map((folder) => {
-        const isProject = depth === 0
-        return {
-          key: folder.id,
-          title: (
-            <span className={isProject ? 'folder-tree-project' : undefined} title={folder.path}>
-              {folder.name}
-            </span>
-          ),
-          icon: isProject ? (
-            <ProjectFilled style={{ color: '#3a79bc' }} />
-          ) : (
-            <FolderFilled style={{ color: '#5b9bd9' }} />
-          ),
-          children: build(folder.id, depth + 1),
-        }
+    const build = (parent: string, space: string, depth: number): DataNode[] =>
+      (byParent.get(parent) || [])
+        .filter((folder) => folder.space === space)
+        .map((folder) => {
+          const isProject = depth === 0 && space === 'main'
+          return {
+            key: folder.id,
+            title: (
+              <span className={isProject ? 'folder-tree-project' : undefined} title={folder.path}>
+                {folder.name}
+              </span>
+            ),
+            icon: isProject ? (
+              <ProjectFilled style={{ color: '#3a79bc' }} />
+            ) : (
+              <FolderFilled style={{ color: '#5b9bd9' }} />
+            ),
+            children: build(folder.id, space, depth + 1),
+          }
+        })
+
+    const mainRoot: DataNode = {
+      key: MAIN_ROOT_KEY,
+      className: 'folder-tree-root-node',
+      icon: <HomeFilled style={{ color: '#3a79bc' }} />,
+      title: (
+        <span className="folder-tree-root-title">
+          <span>全部项目</span>
+          {canEdit && (
+            <Tooltip title="新建项目">
+              <button
+                type="button"
+                className="folder-tree-root-add"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onNewProject()
+                }}
+              >
+                <PlusOutlined />
+              </button>
+            </Tooltip>
+          )}
+        </span>
+      ),
+      children: build('', 'main', 0),
+    }
+    const data = [mainRoot]
+    if (secureRoot) {
+      data.push({
+        key: secureRoot.id,
+        className: 'folder-tree-root-node folder-tree-secure-root',
+        icon: <LockFilled style={{ color: '#7d6f5a' }} />,
+        title: (
+          <span className="folder-tree-root-title">
+            <span>{secureRoot.name}</span>
+            {canUploadSecure && (
+              <Tooltip title="新建文件夹">
+                <button
+                  type="button"
+                  className="folder-tree-root-add"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onNodeAction('new-folder', secureRoot)
+                  }}
+                >
+                  <PlusOutlined />
+                </button>
+              </Tooltip>
+            )}
+          </span>
+        ),
+        children: build(secureRoot.id, 'secure', 0),
       })
-    return build('', 0)
-  }, [folders])
+    }
+    return data
+  }, [folders, secureRoot, canEdit, canUploadSecure, onNewProject, onNodeAction])
+
+  function canManageFolder(node: NodeItem) {
+    if (node.is_zone_root) return false
+    if (node.space === 'secure') return isOwner
+    return canEdit
+  }
 
   function nodeMenuItems(node: NodeItem): MenuProps['items'] {
     const items: MenuProps['items'] = []
-    if (canEdit) {
+    if (node.is_zone_root) {
+      if (canUploadSecure) {
+        items.push({ key: 'new-folder', label: '新建文件夹', icon: <FolderAddOutlined /> })
+      }
+      items.push({ key: 'download', label: '下载文件夹（ZIP）', icon: <DownloadOutlined /> })
+      return items
+    }
+    if (node.space === 'secure') {
+      if (canUploadSecure) {
+        items.push({ key: 'new-folder', label: '新建文件夹', icon: <FolderAddOutlined /> })
+      }
+    } else if (canEdit) {
       items.push({ key: 'new-folder', label: '新建文件夹', icon: <FolderAddOutlined /> })
     }
     items.push({ key: 'download', label: '下载文件夹（ZIP）', icon: <DownloadOutlined /> })
-    if (canEdit) {
+    if (canManageFolder(node)) {
       items.push(
         { type: 'divider' },
         { key: 'rename', label: '重命名', icon: <EditOutlined /> },
@@ -154,7 +250,14 @@ export function FolderTree({
 
   function areaMenuItems(): MenuProps['items'] {
     const items: MenuProps['items'] = []
-    if (canEdit) {
+    const secure = selected === secureRoot?.id || selectedNode?.space === 'secure'
+    if (secure) {
+      if (canUploadSecure) {
+        items.push({ key: 'new-folder', label: '新建文件夹', icon: <FolderAddOutlined /> })
+        items.push({ key: 'upload', label: '上传文件', icon: <UploadOutlined /> })
+        items.push({ type: 'divider' })
+      }
+    } else if (canEdit) {
       items.push({ key: 'new-project', label: '新建项目', icon: <FolderAddOutlined /> })
       if (!selected) {
         items.push({ key: 'upload', label: '上传文件', icon: <UploadOutlined /> })
@@ -163,6 +266,16 @@ export function FolderTree({
     }
     items.push({ key: 'refresh', label: '刷新', icon: <ReloadOutlined /> })
     return items
+  }
+
+  function toggleExpanded(key: string) {
+    const raw = expandedKeys.includes(key)
+      ? expandedKeys.filter((item) => item !== key)
+      : [...expandedKeys, key]
+    const next = visibleExpandedKeys(folders, raw)
+    rememberedExpansion = next
+    hasRememberedExpansion = true
+    setExpandedKeys(next)
   }
 
   function openNodeMenu(event: ReactMouseEvent, node: NodeItem) {
@@ -174,6 +287,19 @@ export function FolderTree({
       items: nodeMenuItems(node),
       onSelect: (key) => onNodeAction(key, node),
     })
+  }
+
+  function rootMenuItems(): MenuProps['items'] {
+    const items: MenuProps['items'] = []
+    if (canEdit) {
+      items.push({ key: 'new-project', label: '新建项目', icon: <FolderAddOutlined /> })
+      if (!selected) {
+        items.push({ key: 'upload', label: '上传文件', icon: <UploadOutlined /> })
+      }
+      items.push({ type: 'divider' })
+    }
+    items.push({ key: 'refresh', label: '刷新', icon: <ReloadOutlined /> })
+    return items
   }
 
   function openAreaMenu(event: ReactMouseEvent) {
@@ -192,65 +318,59 @@ export function FolderTree({
       className="folder-tree"
       onContextMenu={(event) => {
         const target = event.target as HTMLElement
-        if (target.closest('.ant-tree-treenode') || target.closest('.folder-tree-root')) return
+        if (target.closest('.ant-tree-treenode')) return
         openAreaMenu(event)
       }}
     >
       <div className="folder-tree-title">文件目录</div>
-      <div
-        className={`folder-tree-root${selected ? '' : ' selected'}`}
-        onContextMenu={openAreaMenu}
-      >
-        <button type="button" className="folder-tree-root-main" onClick={() => onSelect('')}>
-          <HomeFilled style={{ color: '#3a79bc' }} />
-          <span>全部项目</span>
-        </button>
-        {canEdit && (
-          <Tooltip title="新建项目">
-            <button type="button" className="folder-tree-root-add" onClick={onNewProject}>
-              <PlusOutlined />
-            </button>
-          </Tooltip>
-        )}
-      </div>
       {loading ? (
         <div className="folder-tree-loading"><Spin size="small" /></div>
-      ) : folders.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有项目" />
-      ) : null}
-      <Tree
-        key={`${version}-${folders.length}`}
-        showIcon
-        blockNode
-        autoExpandParent={false}
-        treeData={treeData}
-        expandedKeys={expandedKeys}
-        selectedKeys={selected ? [selected] : []}
-        onExpand={(keys) => {
-          const next = visibleExpandedKeys(folders, keys.map(String))
-          rememberedExpansion = next
-          hasRememberedExpansion = true
-          setExpandedKeys(next)
-        }}
-        onSelect={(keys, info) => {
-          const key = String(keys.length > 0 ? keys[0] : info.node.key)
-          if (key === selected && folders.some((folder) => folder.parent_id === key)) {
-            const raw = expandedKeys.includes(key)
-              ? expandedKeys.filter((item) => item !== key)
-              : [...expandedKeys, key]
-            const next = visibleExpandedKeys(folders, raw)
+      ) : (
+        <Tree
+          key={`${version}-${folders.length}`}
+          showIcon
+          blockNode
+          autoExpandParent={false}
+          treeData={treeData}
+          expandedKeys={expandedKeys}
+          selectedKeys={selected ? [selected] : [MAIN_ROOT_KEY]}
+          onExpand={(keys) => {
+            const next = visibleExpandedKeys(folders, keys.map(String))
             rememberedExpansion = next
             hasRememberedExpansion = true
             setExpandedKeys(next)
-            return
-          }
-          onSelect(key)
-        }}
-        onRightClick={({ event, node }) => {
-          const folder = folders.find((item) => item.id === node.key)
-          if (folder) openNodeMenu(event, folder)
-        }}
-      />
+          }}
+          onSelect={(keys, info) => {
+            const key = String(keys.length > 0 ? keys[0] : info.node.key)
+            onSelect(key === MAIN_ROOT_KEY ? '' : key)
+          }}
+          onClick={(event, node) => {
+            // 原生 dblclick 在快速连击时会并入同一多击序列，按偶数 click 配对才能连续切换。
+            if (event.detail < 2 || event.detail % 2 !== 0) return
+            const key = String(node.key)
+            if (key === MAIN_ROOT_KEY) {
+              onSelect('')
+              return
+            }
+            if (!folders.some((folder) => folder.parent_id === key)) return
+            toggleExpanded(key)
+          }}
+          onRightClick={({ event, node }) => {
+            if (node.key === MAIN_ROOT_KEY) {
+              event.preventDefault()
+              setMenu({
+                x: event.clientX,
+                y: event.clientY,
+                items: rootMenuItems(),
+                onSelect: onAreaAction,
+              })
+              return
+            }
+            const folder = folders.find((item) => item.id === node.key)
+            if (folder) openNodeMenu(event, folder)
+          }}
+        />
+      )}
       <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   )

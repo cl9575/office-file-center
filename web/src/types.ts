@@ -1,5 +1,6 @@
-export type Role = 'admin' | 'editor' | 'viewer'
+export type Role = 'admin' | 'operator' | 'editor' | 'viewer'
 export type NodeKind = 'file' | 'folder'
+export type NodeSpace = 'main' | 'secure'
 
 export interface User {
   id: string
@@ -60,6 +61,35 @@ export interface NodeItem {
   deleted_by?: string
   delete_batch?: string
   path?: string
+  space: NodeSpace
+  visibility_mode?: 'default' | 'custom'
+  is_zone_root?: boolean
+  can_manage?: boolean
+  can_delete?: boolean
+  can_manage_visibility?: boolean
+}
+
+export interface VisibilityUser {
+  id: string
+  display_name: string
+  role: Role
+}
+
+export interface VisibilityInfo {
+  mode: 'default' | 'custom'
+  roles: Role[]
+  users: VisibilityUser[]
+}
+
+export interface VisibilityOptions {
+  roles: Role[]
+  users: VisibilityUser[]
+}
+
+export interface VisibilityChoice {
+  mode: 'default' | 'custom'
+  roles: Role[]
+  users: string[]
 }
 
 export interface VersionItem {
@@ -79,6 +109,7 @@ export interface VersionItem {
 export interface Breadcrumb {
   id: string
   name: string
+  space: NodeSpace
 }
 
 export interface UploadResult {
@@ -102,6 +133,7 @@ export interface AuditRow {
   result: 'success' | 'failure' | 'partial'
   ip: string
   created_at: string
+  secure?: boolean
 }
 
 export interface AuditPage {

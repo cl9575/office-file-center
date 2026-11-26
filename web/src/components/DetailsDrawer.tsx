@@ -13,11 +13,13 @@ import {
   Tooltip,
   Typography,
 } from 'antd'
-import { DownloadOutlined, HistoryOutlined, RollbackOutlined } from '@ant-design/icons'
+import { DownloadOutlined, EditOutlined, EyeOutlined, HistoryOutlined, RollbackOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { api, downloadUrl, formatBytes } from '../api'
-import type { AuditRow, NodeItem, User, VersionItem } from '../types'
-import { actionLabel, fmtTime, resultColors, resultLabels } from '../labels'
+import type { AuditRow, NodeItem, User, VersionItem, VisibilityChoice, VisibilityInfo } from '../types'
+import { actionLabel, fmtTime, resultColors, resultLabels, roleLabels } from '../labels'
+import { previewKindForName } from '../preview'
+import { VisibilityModal } from './VisibilityModal'
 
 const { Text } = Typography
 
@@ -26,12 +28,14 @@ export function DetailsDrawer({
   open,
   user,
   onClose,
+  onPreview,
   onChanged,
 }: {
   node: NodeItem | null
   open: boolean
   user: User
   onClose: () => void
+  onPreview: (node: NodeItem) => void
   onChanged: (node?: NodeItem) => void
 }) {
   const { message } = App.useApp()
@@ -40,6 +44,10 @@ export function DetailsDrawer({
   const [audit, setAudit] = useState<AuditRow[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
+  const [visibility, setVisibility] = useState<VisibilityInfo | null>(null)
+  const [visibilityLoading, setVisibilityLoading] = useState(false)
+  const [visibilityOpen, setVisibilityOpen] = useState(false)
+  const [visibilitySaving, setVisibilitySaving] = useState(false)
 
   useEffect(() => {
     setCurrent(node)
@@ -68,6 +76,60 @@ export function DetailsDrawer({
       alive = false
     }
   }, [open, node?.id])
+
+  useEffect(() => {
+    setVisibility(null)
+    setVisibilityLoading(false)
+    if (!open || !node || node.space !== 'secure' || node.kind !== 'file' || !node.can_manage_visibility) {
+      return
+    }
+    let alive = true
+    setVisibilityLoading(true)
+    api
+      .visibility(node.id)
+      .then((info) => {
+        if (alive) setVisibility(info)
+      })
+      .catch((err) => {
+        if (alive && err instanceof Error) message.error(err.message)
+      })
+      .finally(() => {
+        if (alive) setVisibilityLoading(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [open, node?.id, node?.space, node?.kind, node?.can_manage_visibility, message])
+
+  async function saveVisibility(choice: VisibilityChoice) {
+    if (!current) return
+    setVisibilitySaving(true)
+    try {
+      const info = await api.setVisibility(current.id, choice)
+      setVisibility(info)
+      setVisibilityOpen(false)
+      const updated = { ...current, visibility_mode: info.mode }
+      setCurrent(updated)
+      onChanged(updated)
+      message.success('可见范围已更新')
+    } catch (err) {
+      if (err instanceof Error) message.error(err.message)
+    } finally {
+      setVisibilitySaving(false)
+    }
+  }
+
+  function visibilityText(info: VisibilityInfo | null, mode?: string) {
+    if (!info) {
+      return mode === 'custom' ? '指定可见' : '默认规则'
+    }
+    if (info.mode !== 'custom') return '默认规则'
+    const parts = [
+      ...info.roles.map((role) => roleLabels[role] || role),
+      ...info.users.map((user) => user.display_name),
+    ]
+    return parts.length ? parts.join('、') : '指定可见'
+  }
 
   async function reload(target: NodeItem) {
     try {
@@ -113,6 +175,12 @@ export function DetailsDrawer({
     }
   }
 
+  const canRestore =
+    current?.space === 'secure'
+      ? !!current.can_manage
+      : user.role === 'admin' || user.role === 'operator' || user.role === 'editor'
+  const canPurge = current?.space === 'secure' ? user.is_owner : user.role === 'admin'
+
   const versionColumns: ColumnsType<VersionItem> = [
     {
       title: '版本',
@@ -145,7 +213,7 @@ export function DetailsDrawer({
               下载
             </Button>
           </Tooltip>
-          {(user.role === 'admin' || user.role === 'editor') && (
+          {canRestore && (
             <Popconfirm
               title={`把 V${row.version_no} 恢复为最新版本？`}
               description="当前内容会保留为一个历史版本，不会丢失。"
@@ -162,7 +230,7 @@ export function DetailsDrawer({
               </Button>
             </Popconfirm>
           )}
-          {user.role === 'admin' && !row.is_current && (
+          {canPurge && !row.is_current && (
             <Popconfirm
               title={`清理 V${row.version_no}？`}
               description="清理后该版本不可从系统下载，操作会记录在日志中。"
@@ -217,21 +285,45 @@ export function DetailsDrawer({
                     {current.sha256}
                   </Text>
                 </Descriptions.Item>
+                {current.space === 'secure' && current.can_manage_visibility && (
+                  <Descriptions.Item label="可见范围">
+                    <Space>
+                      <span>{visibilityText(visibility, current.visibility_mode)}</span>
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<EditOutlined />}
+                        loading={visibilityLoading}
+                        disabled={!visibility}
+                        onClick={() => setVisibilityOpen(true)}
+                      >
+                        修改
+                      </Button>
+                    </Space>
+                  </Descriptions.Item>
+                )}
               </>
             )}
             <Descriptions.Item label="更新人">{current.updated_by}</Descriptions.Item>
             <Descriptions.Item label="更新时间">{fmtTime(current.updated_at)}</Descriptions.Item>
           </Descriptions>
           {current.kind === 'file' && (
-            <Button
-              type="primary"
-              icon={<DownloadOutlined />}
-              onClick={() => {
-                window.location.href = downloadUrl(current.id)
-              }}
-            >
-              下载当前版本
-            </Button>
+            <Space wrap>
+              {previewKindForName(current.name) && (
+                <Button icon={<EyeOutlined />} onClick={() => onPreview(current)}>
+                  预览
+                </Button>
+              )}
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                onClick={() => {
+                  window.location.href = downloadUrl(current.id)
+                }}
+              >
+                下载当前版本
+              </Button>
+            </Space>
           )}
         </Space>
       ) : null,
@@ -288,6 +380,13 @@ export function DetailsDrawer({
       destroyOnClose
     >
       <Tabs items={items} />
+      <VisibilityModal
+        open={visibilityOpen}
+        initial={visibility || { mode: current?.visibility_mode === 'custom' ? 'custom' : 'default', roles: [], users: [] }}
+        confirmLoading={visibilitySaving}
+        onCancel={() => setVisibilityOpen(false)}
+        onOk={(choice) => void saveVisibility(choice)}
+      />
     </Drawer>
   )
 }

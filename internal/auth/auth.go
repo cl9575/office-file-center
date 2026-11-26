@@ -307,7 +307,10 @@ func (s *Service) ChangePassword(userID, oldPassword, newPassword string) (strin
 
 func (s *Service) ListUsers() ([]model.User, error) {
 	rows, err := s.DB.Query(`SELECT id, username, display_name, role, is_owner, must_change_password, disabled, created_at
-		FROM users WHERE deleted_at = '' ORDER BY is_owner DESC, CASE role WHEN 'admin' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END, username`)
+		FROM users WHERE deleted_at = ''
+		ORDER BY is_owner DESC,
+			CASE role WHEN 'admin' THEN 0 WHEN 'operator' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,
+			username`)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +337,9 @@ func (s *Service) CountUsers() (int, error) {
 }
 
 func (s *Service) CreateUser(actor model.Actor, username, displayName, password, role string) (model.User, error) {
+	if !actor.IsAdmin() {
+		return model.User{}, apperr.Forbidden("只有管理员可以新建账号")
+	}
 	username = strings.TrimSpace(username)
 	displayName = strings.TrimSpace(displayName)
 	if err := ValidateUsername(username); err != nil {
@@ -342,8 +348,11 @@ func (s *Service) CreateUser(actor model.Actor, username, displayName, password,
 	if displayName == "" || len([]rune(displayName)) > 40 {
 		return model.User{}, apperr.BadRequest("INVALID_DISPLAY_NAME", "显示名称长度应为 1 到 40 个字符")
 	}
-	if role != model.RoleAdmin && role != model.RoleEditor && role != model.RoleViewer {
+	if !model.ValidRole(role) {
 		return model.User{}, apperr.BadRequest("INVALID_ROLE", "角色无效")
+	}
+	if !actor.CanAssignRole(role) {
+		return model.User{}, apperr.New(403, "ADMIN_ASSIGN_FORBIDDEN", "只有主机账号可以设置管理员")
 	}
 	if err := ValidatePassword(password); err != nil {
 		return model.User{}, err
@@ -367,11 +376,14 @@ func (s *Service) CreateUser(actor model.Actor, username, displayName, password,
 }
 
 func (s *Service) UpdateUser(actor model.Actor, id, displayName, role string, disabled bool) (model.User, error) {
+	if !actor.IsAdmin() {
+		return model.User{}, apperr.Forbidden("只有管理员可以维护账号")
+	}
 	displayName = strings.TrimSpace(displayName)
 	if displayName == "" || len([]rune(displayName)) > 40 {
 		return model.User{}, apperr.BadRequest("INVALID_DISPLAY_NAME", "显示名称长度应为 1 到 40 个字符")
 	}
-	if role != model.RoleAdmin && role != model.RoleEditor && role != model.RoleViewer {
+	if !model.ValidRole(role) {
 		return model.User{}, apperr.BadRequest("INVALID_ROLE", "角色无效")
 	}
 	if actor.ID == id && disabled {
@@ -404,6 +416,9 @@ func (s *Service) UpdateUser(actor model.Actor, id, displayName, role string, di
 	if currentOwner == 0 && actor.ID != id && currentRole == actor.Role && !actor.IsOwner {
 		return model.User{}, apperr.New(403, "SAME_LEVEL", "不能编辑同级账号；如需调整请联系主机账号")
 	}
+	if role != currentRole && !actor.CanAssignRole(role) {
+		return model.User{}, apperr.New(403, "ADMIN_ASSIGN_FORBIDDEN", "只有主机账号可以设置管理员")
+	}
 	if currentRole == model.RoleAdmin && (role != model.RoleAdmin || disabled) {
 		var admins int
 		if err := tx.QueryRow(`SELECT COUNT(1) FROM users WHERE role = 'admin' AND disabled = 0`).Scan(&admins); err != nil {
@@ -429,6 +444,9 @@ func (s *Service) UpdateUser(actor model.Actor, id, displayName, role string, di
 }
 
 func (s *Service) ResetPassword(actor model.Actor, id, newPassword string) error {
+	if !actor.IsAdmin() {
+		return apperr.Forbidden("只有管理员可以重置密码")
+	}
 	if err := ValidatePassword(newPassword); err != nil {
 		return err
 	}

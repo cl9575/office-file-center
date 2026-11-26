@@ -29,7 +29,8 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api, ApiError, formatBytes, newUploadId } from '../api'
-import type { NodeItem, UploadResult } from '../types'
+import type { NodeItem, UploadResult, VisibilityChoice } from '../types'
+import { VisibilityModal } from './VisibilityModal'
 
 const { Text } = Typography
 
@@ -41,6 +42,7 @@ interface UploadTarget {
   nodeId?: string
   baseVersionId?: string
   label?: string
+  visibility?: VisibilityChoice
 }
 
 interface IncomingEntry {
@@ -76,7 +78,7 @@ interface ConflictChoice {
 
 interface ConflictState {
   file: File
-  existing: NodeItem
+  existing?: NodeItem
 }
 
 function readFileEntry(entry: FileSystemFileEntry): Promise<File> {
@@ -135,11 +137,12 @@ export const Uploader = forwardRef<
   {
     folderId: string
     maxFileSize: number
+    secure?: boolean
     disabled?: boolean
     onUploaded: (result: UploadResult) => void
     onRefresh: () => void
   }
->(function Uploader({ folderId, maxFileSize, disabled, onUploaded, onRefresh }, ref) {
+>(function Uploader({ folderId, maxFileSize, secure, disabled, onUploaded, onRefresh }, ref) {
   const { message } = App.useApp()
   const [queue, setQueue] = useState<QueueItem[]>([])
   const queueRef = useRef<QueueItem[]>([])
@@ -158,6 +161,23 @@ export const Uploader = forwardRef<
   const [conflict, setConflict] = useState<ConflictState | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const conflictResolve = useRef<((choice: ConflictChoice | null) => void) | null>(null)
+  const [visibilityOpen, setVisibilityOpen] = useState(false)
+  const visibilityResolve = useRef<((choice: VisibilityChoice | null) => void) | null>(null)
+
+  function askVisibility(): Promise<VisibilityChoice | null | undefined> {
+    if (!secure) return Promise.resolve(undefined)
+    return new Promise((resolve) => {
+      visibilityResolve.current = resolve
+      setVisibilityOpen(true)
+    })
+  }
+
+  function finishVisibility(choice: VisibilityChoice | null) {
+    setVisibilityOpen(false)
+    const resolve = visibilityResolve.current
+    visibilityResolve.current = null
+    resolve?.(choice)
+  }
 
   function setQ(updater: (prev: QueueItem[]) => QueueItem[]) {
     queueRef.current = updater(queueRef.current)
@@ -218,6 +238,7 @@ export const Uploader = forwardRef<
       name: item.target.name,
       nodeId: item.target.nodeId,
       baseVersionId: item.target.baseVersionId,
+      visibility: item.target.visibility,
       onProgress: (percent) => {
         setQ((prev) => prev.map((row) => (row.id === item.id ? { ...row, progress: percent } : row)))
       },
@@ -260,7 +281,7 @@ export const Uploader = forwardRef<
     return `${name.slice(0, dot)} (1)${name.slice(dot)}`
   }
 
-  function askConflict(file: File, existing: NodeItem): Promise<ConflictChoice | null> {
+  function askConflict(file: File, existing?: NodeItem): Promise<ConflictChoice | null> {
     return new Promise((resolve) => {
       conflictResolve.current = resolve
       setRenameValue(suggestName(file.name))
@@ -277,8 +298,13 @@ export const Uploader = forwardRef<
 
   async function prepareTarget(file: File): Promise<UploadTarget | null> {
     const resolved = await api.resolve(folderId, file.name)
-    if (!resolved.exists || !resolved.node) {
+    if (!resolved.exists) {
       return { name: file.name, parentId: folderId }
+    }
+    if (!resolved.node) {
+      const choice = await askConflict(file)
+      if (!choice) return null
+      return { name: (choice.name || '').trim(), parentId: folderId }
     }
     const existing = resolved.node
     const choice = await askConflict(file, existing)
@@ -298,9 +324,15 @@ export const Uploader = forwardRef<
     return { name: (choice.name || '').trim(), parentId: folderId }
   }
 
-  async function addFiles(files: File[]) {
+  async function addFiles(files: File[], presetVisibility?: VisibilityChoice) {
     if (disabled) return
     if (!files.length) return
+    let visibility = presetVisibility
+    if (secure && !visibility) {
+      const chosen = await askVisibility()
+      if (!chosen) return
+      visibility = chosen
+    }
     const batchId = newUploadId()
     const batchName = files.length === 1 ? files[0].name : '本次上传'
     const created: QueueItem[] = []
@@ -323,7 +355,7 @@ export const Uploader = forwardRef<
           status: 'waiting',
           progress: 0,
           batch: batchId,
-          target: { ...target, label: file.name },
+          target: { ...target, label: file.name, visibility: target.nodeId ? undefined : visibility },
         })
       } catch (err) {
         message.error(err instanceof ApiError ? err.message : `无法检查「${file.name}」`)
@@ -338,6 +370,12 @@ export const Uploader = forwardRef<
 
   async function addEntries(entries: IncomingEntry[]) {
     if (disabled || !entries.length) return
+    let visibility: VisibilityChoice | undefined
+    if (secure) {
+      const chosen = await askVisibility()
+      if (!chosen) return
+      visibility = chosen
+    }
     const plain: File[] = []
     const groups = new Map<string, IncomingEntry[]>()
     for (const entry of entries) {
@@ -351,13 +389,13 @@ export const Uploader = forwardRef<
       if (list) list.push({ file: entry.file, relPath: rel })
       else groups.set(root, [{ file: entry.file, relPath: rel }])
     }
-    if (plain.length) await addFiles(plain)
+    if (plain.length) await addFiles(plain, visibility)
     for (const [root, list] of groups) {
-      await addFolderGroup(root, list)
+      await addFolderGroup(root, list, visibility)
     }
   }
 
-  async function addFolderGroup(root: string, entries: IncomingEntry[]) {
+  async function addFolderGroup(root: string, entries: IncomingEntry[], visibility?: VisibilityChoice) {
     if (invalidName(root)) {
       message.error(`文件夹「${root}」的名称不符合要求，已跳过`)
       return
@@ -477,6 +515,7 @@ export const Uploader = forwardRef<
               nodeId: existing?.id,
               baseVersionId: existing?.current_version_id,
               label: entry.relPath,
+              visibility: existing ? undefined : visibility,
             },
           })
           if (existing) replaced += 1
@@ -725,7 +764,7 @@ export const Uploader = forwardRef<
 
       <Modal
         open={!!conflict}
-        title="发现同名文件"
+        title={conflict?.existing ? '发现同名文件' : '名称已存在'}
         closable
         maskClosable={false}
         onCancel={() => finishConflict(null)}
@@ -741,7 +780,7 @@ export const Uploader = forwardRef<
                 message.error('请输入新文件名')
                 return
               }
-              if (name === conflict?.existing.name) {
+              if (name === conflict?.existing?.name) {
                 message.error('新文件名不能与原名相同')
                 return
               }
@@ -752,11 +791,17 @@ export const Uploader = forwardRef<
           </Button>,
           <Tooltip
             key="replace"
-            title={conflict?.existing.kind === 'folder' ? '目标是文件夹，不能替换' : undefined}
+            title={
+              !conflict?.existing
+                ? '同名项目不可见，无法替换'
+                : conflict.existing.kind === 'folder'
+                  ? '目标是文件夹，不能替换'
+                  : undefined
+            }
           >
             <Button
               type="primary"
-              disabled={conflict?.existing.kind !== 'file'}
+              disabled={conflict?.existing?.kind !== 'file'}
               onClick={() => finishConflict({ mode: 'replace' })}
             >
               替换为新版本
@@ -766,19 +811,25 @@ export const Uploader = forwardRef<
       >
         {conflict && (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <div className="conflict-summary">
-              <InboxOutlined style={{ fontSize: 32, color: '#3a79bc' }} />
-              <div>
-                <div><Text strong>{conflict.existing.name}</Text></div>
-                <Text type="secondary">
-                  当前为 {conflict.existing.kind === 'folder' ? '文件夹' : `第 ${conflict.existing.version_no} 版`}，
-                  最后由 {conflict.existing.updated_by} 于 {dayjs(conflict.existing.updated_at).format('YYYY-MM-DD HH:mm')} 更新
-                </Text>
+            {conflict.existing ? (
+              <div className="conflict-summary">
+                <InboxOutlined style={{ fontSize: 32, color: '#3a79bc' }} />
+                <div>
+                  <div><Text strong>{conflict.existing.name}</Text></div>
+                  <Text type="secondary">
+                    当前为 {conflict.existing.kind === 'folder' ? '文件夹' : `第 ${conflict.existing.version_no} 版`}，
+                    最后由 {conflict.existing.updated_by} 于 {dayjs(conflict.existing.updated_at).format('YYYY-MM-DD HH:mm')} 更新
+                  </Text>
+                </div>
               </div>
-            </div>
-            <Text type="secondary">
-              选择“替换为新版本”会保留现有历史并生成新版本；也可以修改下面的名称，作为另一个文件上传。
-            </Text>
+            ) : (
+              <Text>同名项目已存在，请使用其他名称。</Text>
+            )}
+            {conflict.existing && (
+              <Text type="secondary">
+                选择“替换为新版本”会保留现有历史并生成新版本；也可以修改下面的名称，作为另一个文件上传。
+              </Text>
+            )}
             <Input
               value={renameValue}
               onChange={(event) => setRenameValue(event.target.value)}
@@ -788,6 +839,12 @@ export const Uploader = forwardRef<
           </Space>
         )}
       </Modal>
+
+      <VisibilityModal
+        open={visibilityOpen}
+        onCancel={() => finishVisibility(null)}
+        onOk={(choice) => finishVisibility(choice)}
+      />
     </>
   )
 })

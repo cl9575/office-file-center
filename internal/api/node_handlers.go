@@ -24,6 +24,21 @@ import (
 
 var uploadIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
+func csvValues(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 type uploadTask struct {
 	ID        string
 	UserID    string
@@ -36,7 +51,7 @@ type uploadTask struct {
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request, user model.User) {
 	parent := r.URL.Query().Get("parent")
 	q := r.URL.Query().Get("q")
-	items, err := s.Files.List(parent, q)
+	items, err := s.Files.List(parent, q, actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -45,7 +60,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request, user mo
 }
 
 func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request, user model.User) {
-	node, err := s.Files.GetActive(r.PathValue("id"))
+	node, err := s.Files.GetActiveFor(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -54,7 +69,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request, user m
 }
 
 func (s *Server) handleBreadcrumbs(w http.ResponseWriter, r *http.Request, user model.User) {
-	crumbs, err := s.Files.Breadcrumbs(r.PathValue("id"))
+	crumbs, err := s.Files.Breadcrumbs(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -91,7 +106,7 @@ func (s *Server) handlePatchNode(w http.ResponseWriter, r *http.Request, user mo
 		return
 	}
 	id := r.PathValue("id")
-	node, err := s.Files.GetActive(id)
+	node, err := s.Files.GetActiveFor(id, actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -114,6 +129,10 @@ func (s *Server) handlePatchNode(w http.ResponseWriter, r *http.Request, user mo
 }
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request, user model.User) {
+	if _, err := s.Files.GetActiveFor(r.PathValue("id"), actorOf(user, r)); err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
 	count, err := s.Files.SoftDelete(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
@@ -123,7 +142,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request, user m
 }
 
 func (s *Server) handleVersions(w http.ResponseWriter, r *http.Request, user model.User) {
-	versions, err := s.Files.ListVersions(r.PathValue("id"))
+	versions, err := s.Files.ListVersions(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -132,12 +151,47 @@ func (s *Server) handleVersions(w http.ResponseWriter, r *http.Request, user mod
 }
 
 func (s *Server) handleNodeAudit(w http.ResponseWriter, r *http.Request, user model.User) {
-	rows, err := s.Files.NodeAudit(r.PathValue("id"))
+	rows, err := s.Files.NodeAudit(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"items": rows})
+}
+
+func (s *Server) handleGetVisibility(w http.ResponseWriter, r *http.Request, user model.User) {
+	info, err := s.Files.GetVisibility(r.PathValue("id"), actorOf(user, r))
+	if err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleSetVisibility(w http.ResponseWriter, r *http.Request, user model.User) {
+	var in files.Visibility
+	if !s.decodeJSON(w, r, &in) {
+		return
+	}
+	info, err := s.Files.SetVisibility(r.PathValue("id"), actorOf(user, r), in)
+	if err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleVisibilityOptions(w http.ResponseWriter, r *http.Request, user model.User) {
+	if !user.CanUploadSecure() {
+		s.writeErr(w, r, apperr.Forbidden("只有操作员及以上可以设置权限区可见范围"))
+		return
+	}
+	options, err := s.Files.VisibilityOptions(actorOf(user, r))
+	if err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, options)
 }
 
 func (s *Server) handleFolderTree(w http.ResponseWriter, r *http.Request, user model.User) {
@@ -157,7 +211,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request, user mode
 		s.writeErr(w, r, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"exists": exists, "node": node})
+	var visible *files.Node
+	if exists {
+		ok, err := s.Files.CanViewNode(node, actorOf(user, r))
+		if err != nil {
+			s.writeErr(w, r, err)
+			return
+		}
+		if ok {
+			visible = &node
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"exists": exists, "node": visible})
 }
 
 func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request, user model.User) {
@@ -166,6 +231,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request, us
 		BaseVersionID string `json:"base_version_id"`
 	}
 	if !s.decodeJSON(w, r, &in) {
+		return
+	}
+	if _, err := s.Files.GetActiveFor(r.PathValue("id"), actorOf(user, r)); err != nil {
+		s.writeErr(w, r, err)
 		return
 	}
 	result, err := s.Files.RestoreVersion(r.PathValue("id"), in.VersionID, in.BaseVersionID, actorOf(user, r))
@@ -177,6 +246,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request, us
 }
 
 func (s *Server) handlePurgeVersion(w http.ResponseWriter, r *http.Request, user model.User) {
+	if _, err := s.Files.GetActiveFor(r.PathValue("id"), actorOf(user, r)); err != nil {
+		s.writeErr(w, r, err)
+		return
+	}
 	if err := s.Files.PurgeVersion(r.PathValue("id"), r.PathValue("versionId"), actorOf(user, r)); err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -185,7 +258,7 @@ func (s *Server) handlePurgeVersion(w http.ResponseWriter, r *http.Request, user
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, user model.User) {
-	node, version, err := s.Files.ResolveVersion(r.PathValue("id"), r.URL.Query().Get("version"))
+	node, version, err := s.Files.ResolveVersion(r.PathValue("id"), r.URL.Query().Get("version"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -196,6 +269,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, user mod
 			ActorID: user.ID, ActorName: user.DisplayName, Action: "download", TargetType: "file",
 			TargetID: node.ID, TargetName: node.Name, TargetPath: node.Path,
 			Detail: fmt.Sprintf("V%d 内容缺失", version.VersionNo), Result: audit.ResultFailure, IP: requestIP(r),
+			Secure: node.Space == model.SpaceSecure,
 		})
 		s.writeErr(w, r, apperr.Internal("文件内容缺失，请联系管理员检查存储或备份"))
 		return
@@ -215,12 +289,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, user mod
 		ActorID: user.ID, ActorName: user.DisplayName, Action: "download", TargetType: "file",
 		TargetID: node.ID, TargetName: node.Name, TargetPath: node.Path,
 		Detail: fmt.Sprintf("下载 V%d，声明 %d 字节，实际发送 %d 字节", version.VersionNo, version.Size, cw.n),
-		Result: audit.ResultSuccess, IP: requestIP(r),
+		Result: audit.ResultSuccess, IP: requestIP(r), Secure: node.Space == model.SpaceSecure,
 	})
 }
 
 func (s *Server) handleFolderDownload(w http.ResponseWriter, r *http.Request, user model.User) {
-	root, err := s.Files.GetActive(r.PathValue("id"))
+	root, err := s.Files.GetActiveFor(r.PathValue("id"), actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -229,7 +303,7 @@ func (s *Server) handleFolderDownload(w http.ResponseWriter, r *http.Request, us
 		s.writeErr(w, r, apperr.BadRequest("NOT_FOLDER", "只能下载文件夹"))
 		return
 	}
-	entries, err := s.Files.ArchiveEntries(root.ID)
+	entries, err := s.Files.ArchiveEntries(root.ID, actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -253,6 +327,7 @@ func (s *Server) handleFolderDownload(w http.ResponseWriter, r *http.Request, us
 			ActorID: user.ID, ActorName: user.DisplayName, Action: "download_folder", TargetType: "folder",
 			TargetID: root.ID, TargetName: root.Name, TargetPath: root.Path,
 			Detail: detail, Result: audit.ResultFailure, IP: requestIP(r),
+			Secure: root.Space == model.SpaceSecure,
 		})
 	}
 	for _, entry := range entries {
@@ -308,7 +383,7 @@ func (s *Server) handleFolderDownload(w http.ResponseWriter, r *http.Request, us
 		ActorID: user.ID, ActorName: user.DisplayName, Action: "download_folder", TargetType: "folder",
 		TargetID: root.ID, TargetName: root.Name, TargetPath: root.Path,
 		Detail: fmt.Sprintf("下载文件夹 ZIP，%d 个文件，原文 %d 字节，发送 %d 字节", files, total, cw.n),
-		Result: audit.ResultSuccess, IP: requestIP(r),
+		Result: audit.ResultSuccess, IP: requestIP(r), Secure: root.Space == model.SpaceSecure,
 	})
 }
 
@@ -324,6 +399,14 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 }
 
 func attachmentHeader(name string) string {
+	return contentDispositionHeader("attachment", name)
+}
+
+func inlineHeader(name string) string {
+	return contentDispositionHeader("inline", name)
+}
+
+func contentDispositionHeader(disposition, name string) string {
 	var fallback strings.Builder
 	for _, r := range name {
 		if r < 128 && r != '"' && r != '\\' && r >= 32 {
@@ -333,11 +416,11 @@ func attachmentHeader(name string) string {
 	if fallback.Len() == 0 {
 		fallback.WriteString("download")
 	}
-	return fmt.Sprintf("attachment; filename=\"%s\"; filename*=UTF-8''%s", fallback.String(), url.PathEscape(name))
+	return fmt.Sprintf("%s; filename=\"%s\"; filename*=UTF-8''%s", disposition, fallback.String(), url.PathEscape(name))
 }
 
 func actorOf(user model.User, r *http.Request) files.Actor {
-	return files.Actor{ID: user.ID, DisplayName: user.DisplayName, Role: user.Role, IP: requestIP(r)}
+	return files.Actor{ID: user.ID, DisplayName: user.DisplayName, Role: user.Role, IsOwner: user.IsOwner, IP: requestIP(r)}
 }
 
 type uploadConflict struct {
@@ -406,6 +489,53 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, user model
 	nodeID := q.Get("node")
 	base := q.Get("base")
 	parent := q.Get("parent")
+	actor := actorOf(user, r)
+	vis := files.Visibility{
+		Mode:  q.Get("visibility_mode"),
+		Roles: csvValues(q.Get("visibility_roles")),
+		Users: csvValues(q.Get("visibility_users")),
+	}
+
+	uploadSpace := model.SpaceMain
+	var targetNode *files.Node
+	if nodeID != "" {
+		target, err := s.Files.GetActiveFor(nodeID, actor)
+		if err != nil {
+			s.writeErr(w, r, err)
+			return
+		}
+		if target.Kind != model.KindFile {
+			s.writeErr(w, r, apperr.BadRequest("NOT_FILE", "目标不是文件"))
+			return
+		}
+		if !target.CanManage {
+			s.writeErr(w, r, apperr.Forbidden("没有权限更新该文件"))
+			return
+		}
+		uploadSpace = target.Space
+		targetNode = &target
+	} else {
+		if parent != "" {
+			parentNode, err := s.Files.GetActiveFor(parent, actor)
+			if err != nil {
+				s.writeErr(w, r, err)
+				return
+			}
+			if parentNode.Kind != model.KindFolder {
+				s.writeErr(w, r, apperr.BadRequest("NOT_FOLDER", "上传目标不是文件夹"))
+				return
+			}
+			uploadSpace = parentNode.Space
+		}
+		if uploadSpace == model.SpaceSecure && !user.CanUploadSecure() {
+			s.writeErr(w, r, apperr.Forbidden("只有操作员及以上可以上传到权限区"))
+			return
+		}
+		if uploadSpace == model.SpaceMain && !user.CanEdit() {
+			s.writeErr(w, r, apperr.Forbidden("当前账号没有编辑权限"))
+			return
+		}
+	}
 
 	task, err := s.beginUploadTask(uploadID, user.ID)
 	if err != nil {
@@ -438,17 +568,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, user model
 	}
 
 	if nodeID != "" {
-		target, err := s.Files.GetActive(nodeID)
-		if err != nil {
-			s.markTaskFailed(uploadID, err)
-			s.writeErr(w, r, err)
-			return
-		}
-		if target.Kind != model.KindFile {
-			s.markTaskFailed(uploadID, errors.New("目标不是文件"))
-			s.writeErr(w, r, apperr.BadRequest("NOT_FILE", "目标不是文件"))
-			return
-		}
+		target := *targetNode
 		if base == "" || base != target.CurrentVersionID {
 			s.markTaskFailed(uploadID, errors.New("版本冲突"))
 			s.writeJSON(w, http.StatusConflict, map[string]any{
@@ -466,7 +586,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, user model
 		}
 		if exists {
 			s.markTaskFailed(uploadID, apperr.Conflict("NAME_EXISTS", "同名项目已存在"))
-			s.writeUploadConflict(w, r, "同一目录下已存在同名项目，请选择替换为新版本或改名", &existing)
+			visible, err := s.Files.CanViewNode(existing, actor)
+			if err != nil {
+				s.writeErr(w, r, err)
+				return
+			}
+			if visible {
+				s.writeUploadConflict(w, r, "同一目录下已存在同名项目，请选择替换为新版本或改名", &existing)
+			} else {
+				s.writeUploadConflict(w, r, "同一目录下已存在同名项目，请使用其他名称", nil)
+			}
 			return
 		}
 	}
@@ -481,7 +610,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, user model
 		s.markTaskFailed(uploadID, err)
 		_ = s.Audit.Log(audit.Event{
 			ActorID: user.ID, ActorName: user.DisplayName, Action: "upload_failed", TargetType: "file",
-			TargetName: name, Detail: "接收文件失败：" + err.Error(), Result: audit.ResultFailure, IP: requestIP(r),
+			TargetName: name, Detail: "接收文件失败：" + err.Error(), Result: audit.ResultFailure,
+			IP: requestIP(r), Secure: uploadSpace == model.SpaceSecure,
 		})
 		s.writeErr(w, r, apperr.BadRequest("UPLOAD_ABORTED", "上传中断，请重试"))
 		return
@@ -495,16 +625,17 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, user model
 
 	var result files.UploadResult
 	if nodeID != "" {
-		result, err = s.Files.UploadVersion(nodeID, base, note, obj, actorOf(user, r))
+		result, err = s.Files.UploadVersion(nodeID, base, note, obj, actor)
 	} else {
-		result, err = s.Files.UploadNew(parent, name, note, obj, actorOf(user, r))
+		result, err = s.Files.UploadNew(parent, name, note, obj, actor, vis)
 	}
 	if err != nil {
 		_ = s.Files.Store.DeleteObject(obj.ID)
 		s.markTaskFailed(uploadID, err)
 		_ = s.Audit.Log(audit.Event{
 			ActorID: user.ID, ActorName: user.DisplayName, Action: "upload_failed", TargetType: "file",
-			TargetName: name, Detail: err.Error(), Result: audit.ResultFailure, IP: requestIP(r),
+			TargetName: name, Detail: err.Error(), Result: audit.ResultFailure,
+			IP: requestIP(r), Secure: uploadSpace == model.SpaceSecure,
 		})
 		s.writeErr(w, r, err)
 		return

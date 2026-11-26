@@ -81,6 +81,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}/breadcrumbs", s.authed(s.handleBreadcrumbs))
 	mux.HandleFunc("GET /api/nodes/{id}/versions", s.authed(s.handleVersions))
 	mux.HandleFunc("GET /api/nodes/{id}/audit", s.authed(s.handleNodeAudit))
+	mux.HandleFunc("GET /api/nodes/{id}/visibility", s.authed(s.handleGetVisibility))
+	mux.HandleFunc("PUT /api/nodes/{id}/visibility", s.authed(s.handleSetVisibility))
+	mux.HandleFunc("GET /api/visibility/options", s.authed(s.handleVisibilityOptions))
+	mux.HandleFunc("GET /api/nodes/{id}/preview", s.authed(s.handlePreview))
 	mux.HandleFunc("GET /api/nodes/{id}/download", s.authed(s.handleDownload))
 	mux.HandleFunc("GET /api/nodes/{id}/download-folder", s.authed(s.handleFolderDownload))
 	mux.HandleFunc("POST /api/nodes/{id}/restore-version", s.authed(s.handleRestoreVersion))
@@ -89,23 +93,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/upload", s.authed(s.handleUpload))
 	mux.HandleFunc("GET /api/upload/{id}", s.authed(s.handleUploadStatus))
 
-	mux.HandleFunc("GET /api/recycle", s.admin(s.handleListRecycle))
-	mux.HandleFunc("POST /api/recycle/{batch}/restore", s.admin(s.handleRestoreRecycle))
-	mux.HandleFunc("DELETE /api/recycle/{batch}", s.admin(s.handlePurgeRecycle))
-	mux.HandleFunc("DELETE /api/recycle", s.admin(s.handlePurgeAllRecycle))
+	mux.HandleFunc("GET /api/recycle", s.staff(s.handleListRecycle))
+	mux.HandleFunc("POST /api/recycle/{batch}/restore", s.staff(s.handleRestoreRecycle))
+	mux.HandleFunc("DELETE /api/recycle/{batch}", s.staff(s.handlePurgeRecycle))
+	mux.HandleFunc("DELETE /api/recycle", s.staff(s.handlePurgeAllRecycle))
 
-	mux.HandleFunc("GET /api/admin/users", s.admin(s.handleListUsers))
+	mux.HandleFunc("GET /api/admin/users", s.staff(s.handleListUsers))
 	mux.HandleFunc("POST /api/admin/users", s.admin(s.handleCreateUser))
 	mux.HandleFunc("PATCH /api/admin/users/{id}", s.admin(s.handleUpdateUser))
 	mux.HandleFunc("DELETE /api/admin/users/{id}", s.admin(s.handleDeleteUser))
 	mux.HandleFunc("POST /api/admin/users/{id}/reset-password", s.admin(s.handleResetPassword))
-	mux.HandleFunc("GET /api/admin/audit", s.admin(s.handleAuditList))
-	mux.HandleFunc("GET /api/admin/audit.csv", s.admin(s.handleAuditExport))
-	mux.HandleFunc("GET /api/admin/settings", s.admin(s.handleGetSettings))
-	mux.HandleFunc("PUT /api/admin/settings", s.admin(s.handleUpdateSettings))
-	mux.HandleFunc("GET /api/admin/system", s.admin(s.handleSystem))
-	mux.HandleFunc("GET /api/admin/backups", s.admin(s.handleListBackups))
-	mux.HandleFunc("POST /api/admin/backups/run", s.admin(s.handleRunBackup))
+	mux.HandleFunc("GET /api/admin/audit", s.staff(s.handleAuditList))
+	mux.HandleFunc("GET /api/admin/audit.csv", s.staff(s.handleAuditExport))
+	mux.HandleFunc("GET /api/admin/settings", s.staff(s.handleGetSettings))
+	mux.HandleFunc("PUT /api/admin/settings", s.staff(s.handleUpdateSettings))
+	mux.HandleFunc("GET /api/admin/system", s.staff(s.handleSystem))
+	mux.HandleFunc("GET /api/admin/backups", s.staff(s.handleListBackups))
+	mux.HandleFunc("POST /api/admin/backups/run", s.staff(s.handleRunBackup))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, r, apperr.NotFound("接口不存在"))
@@ -236,6 +240,16 @@ func (s *Server) admin(h authedHandler) http.HandlerFunc {
 	return s.authed(func(w http.ResponseWriter, r *http.Request, u model.User) {
 		if !u.IsAdmin() {
 			s.writeErr(w, r, apperr.Forbidden("只有管理员可以执行此操作"))
+			return
+		}
+		h(w, r, u)
+	})
+}
+
+func (s *Server) staff(h authedHandler) http.HandlerFunc {
+	return s.authed(func(w http.ResponseWriter, r *http.Request, u model.User) {
+		if !u.CanAccessAdmin() {
+			s.writeErr(w, r, apperr.Forbidden("只有管理员或操作员可以进入后台"))
 			return
 		}
 		h(w, r, u)

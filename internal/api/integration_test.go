@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/text/encoding/simplifiedchinese"
+
 	"lanfile/internal/api"
 	"lanfile/internal/audit"
 	"lanfile/internal/auth"
@@ -178,6 +180,39 @@ func (e *env) upload(client *http.Client, name, content, parent, nodeID, base st
 	return e.uploadRaw(client, model.NewID(), name, content, parent, nodeID, base)
 }
 
+func (e *env) uploadSecure(client *http.Client, name, content, parent, mode string, roles, users []string) (int, []byte) {
+	e.t.Helper()
+	q := url.Values{}
+	q.Set("upload_id", model.NewID())
+	q.Set("name", name)
+	q.Set("note", "secure test")
+	if parent != "" {
+		q.Set("parent", parent)
+	}
+	q.Set("visibility_mode", mode)
+	if len(roles) > 0 {
+		q.Set("visibility_roles", strings.Join(roles, ","))
+	}
+	if len(users) > 0 {
+		q.Set("visibility_users", strings.Join(users, ","))
+	}
+	req, err := http.NewRequest("PUT", e.ts.URL+"/api/upload?"+q.Encode(), strings.NewReader(content))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	req.ContentLength = int64(len(content))
+	res, err := client.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return res.StatusCode, body
+}
+
 func (e *env) download(client *http.Client, nodeID, versionID string) (int, []byte) {
 	e.t.Helper()
 	path := "/api/nodes/" + nodeID + "/download"
@@ -186,6 +221,27 @@ func (e *env) download(client *http.Client, nodeID, versionID string) (int, []by
 	}
 	code, body := e.req(client, "GET", path, nil)
 	return code, body
+}
+
+func (e *env) preview(client *http.Client, nodeID, rangeHeader string) (*http.Response, []byte) {
+	e.t.Helper()
+	req, err := http.NewRequest("GET", e.ts.URL+"/api/nodes/"+nodeID+"/preview", nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return res, body
 }
 
 func TestFileVersionLifecycle(t *testing.T) {
@@ -239,6 +295,10 @@ func TestFileVersionLifecycle(t *testing.T) {
 		t.Fatalf("restored content mismatch: %d %q", code, body)
 	}
 
+	code, body = e.req(e.admin, "PATCH", "/api/nodes/"+restored.Node.ID, map[string]string{"name": "报价-最终.pdf"})
+	if code != http.StatusBadRequest || decode[errorPayload](t, body).Error.Code != "EXTENSION_IMMUTABLE" {
+		t.Fatalf("rename must keep file extension: %d %s", code, body)
+	}
 	code, body = e.req(e.admin, "PATCH", "/api/nodes/"+restored.Node.ID, map[string]string{"name": "报价-最终.txt"})
 	if code != 200 {
 		t.Fatalf("rename: %d %s", code, body)
@@ -1084,6 +1144,567 @@ func TestFolderZipDownload(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("file should not be downloadable as folder: %d", code)
 	}
+}
+
+func TestFilePreview(t *testing.T) {
+	e := newEnv(t)
+	e.setupAdmin()
+
+	code, body := e.upload(e.admin, "图片.PNG", "image-bytes", "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload image: %d %s", code, body)
+	}
+	imageNode := decode[uploadResponse](t, body).Node
+
+	res, content := e.preview(e.admin, imageNode.ID, "")
+	if res.StatusCode != http.StatusOK || string(content) != "image-bytes" {
+		t.Fatalf("image preview failed: %d %q", res.StatusCode, content)
+	}
+	if res.Header.Get("Content-Type") != "image/png" || res.Header.Get("X-Content-Type-Options") != "nosniff" ||
+		res.Header.Get("Cache-Control") != "private, no-store, max-age=0" ||
+		!strings.HasPrefix(res.Header.Get("Content-Disposition"), "inline;") {
+		t.Fatalf("image preview headers: %+v", res.Header)
+	}
+	res, content = e.preview(e.admin, imageNode.ID, "bytes=0-4")
+	if res.StatusCode != http.StatusPartialContent || string(content) != "image" ||
+		res.Header.Get("Content-Range") != "bytes 0-4/11" {
+		t.Fatalf("image range preview failed: %d %q %+v", res.StatusCode, content, res.Header)
+	}
+
+	code, body = e.upload(e.admin, "说明.TXT", "第一行\nsecond", "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload text: %d %s", code, body)
+	}
+	textNode := decode[uploadResponse](t, body).Node
+	res, content = e.preview(e.admin, textNode.ID, "")
+	if res.StatusCode != http.StatusOK || string(content) != "第一行\nsecond" ||
+		res.Header.Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("utf-8 text preview failed: %d %q %+v", res.StatusCode, content, res.Header)
+	}
+
+	code, body = e.upload(e.admin, "版本.txt", "version-one", "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload versioned text: %d %s", code, body)
+	}
+	versioned := decode[uploadResponse](t, body)
+	code, body = e.upload(e.admin, "版本.txt", "version-two", "", versioned.Node.ID, versioned.Node.CurrentVersionID)
+	if code != http.StatusOK {
+		t.Fatalf("upload current version: %d %s", code, body)
+	}
+	if res, content := e.preview(e.admin, versioned.Node.ID, ""); res.StatusCode != http.StatusOK || string(content) != "version-two" {
+		t.Fatalf("preview should use current version: %d %q", res.StatusCode, content)
+	}
+
+	gbk, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte("中文日志"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body = e.upload(e.admin, "旧编码.log", string(gbk), "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload gbk text: %d %s", code, body)
+	}
+	gbkNode := decode[uploadResponse](t, body).Node
+	if res, content := e.preview(e.admin, gbkNode.ID, ""); res.StatusCode != http.StatusOK || string(content) != "中文日志" {
+		t.Fatalf("gbk text preview failed: %d %q", res.StatusCode, content)
+	}
+
+	large := strings.Repeat("A", (1<<20)+10)
+	code, body = e.upload(e.admin, "大文本.txt", large, "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload large text: %d %s", code, body)
+	}
+	largeNode := decode[uploadResponse](t, body).Node
+	res, content = e.preview(e.admin, largeNode.ID, "")
+	if res.StatusCode != http.StatusOK || len(content) != 1<<20 || res.Header.Get("X-Preview-Truncated") != "1" {
+		t.Fatalf("large text should be truncated: %d body=%d headers=%+v", res.StatusCode, len(content), res.Header)
+	}
+
+	for name, wantType := range map[string]string{
+		"报告.pdf":  "application/pdf",
+		"声音.mp3":  "audio/mpeg",
+		"录音.wav":  "audio/wav",
+		"视频.mp4":  "video/mp4",
+		"网页.webm": "video/webm",
+	} {
+		code, body := e.upload(e.admin, name, "preview-"+name, "", "", "")
+		if code != http.StatusOK {
+			t.Fatalf("upload %s: %d %s", name, code, body)
+		}
+		node := decode[uploadResponse](t, body).Node
+		res, content := e.preview(e.admin, node.ID, "")
+		if res.StatusCode != http.StatusOK || string(content) != "preview-"+name || res.Header.Get("Content-Type") != wantType {
+			t.Fatalf("preview %s failed: %d %q %+v", name, res.StatusCode, content, res.Header)
+		}
+	}
+
+	for _, name := range []string{"页面.html", "图标.svg"} {
+		code, body := e.upload(e.admin, name, "<script>alert(1)</script>", "", "", "")
+		if code != http.StatusOK {
+			t.Fatalf("upload unsupported %s: %d %s", name, code, body)
+		}
+		node := decode[uploadResponse](t, body).Node
+		if res, content := e.preview(e.admin, node.ID, ""); res.StatusCode != http.StatusUnsupportedMediaType ||
+			bytes.Contains(content, []byte("<script>")) {
+			t.Fatalf("unsupported preview %s should be rejected: %d %q", name, res.StatusCode, content)
+		}
+	}
+
+	code, body = e.req(e.admin, "DELETE", "/api/nodes/"+imageNode.ID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete preview image: %d %s", code, body)
+	}
+	if res, _ := e.preview(e.admin, imageNode.ID, ""); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("preview after delete should be 404, got %d", res.StatusCode)
+	}
+}
+
+func (e *env) createUserAs(actor *http.Client, username, role string) model.User {
+	e.t.Helper()
+	password := "pass-" + username + "-123"
+	code, body := e.req(actor, "POST", "/api/admin/users", map[string]string{
+		"username": username, "display_name": username, "password": password, "role": role,
+	})
+	if code != http.StatusCreated {
+		e.t.Fatalf("create %s: %d %s", username, code, body)
+	}
+	return decode[model.User](e.t, body)
+}
+
+func (e *env) loginAs(username string) *http.Client {
+	e.t.Helper()
+	client := newClient()
+	code, body := e.req(client, "POST", "/api/auth/login", map[string]string{
+		"username": username, "password": "pass-" + username + "-123",
+	})
+	if code != http.StatusOK {
+		e.t.Fatalf("login %s: %d %s", username, code, body)
+	}
+	return client
+}
+
+func (e *env) listNames(client *http.Client, parent string) map[string]bool {
+	e.t.Helper()
+	code, body := e.req(client, "GET", "/api/nodes?parent="+url.QueryEscape(parent), nil)
+	if code != http.StatusOK {
+		e.t.Fatalf("list nodes: %d %s", code, body)
+	}
+	page := decode[struct {
+		Items []files.Node `json:"items"`
+	}](e.t, body)
+	names := map[string]bool{}
+	for _, item := range page.Items {
+		names[item.Name] = true
+	}
+	return names
+}
+
+func TestOperatorRoleAndAccountAdministration(t *testing.T) {
+	e := newEnv(t)
+	e.setupAdmin()
+	operator := e.createUserAs(e.admin, "operator1", "operator")
+	admin2 := e.createUserAs(e.admin, "admin2", "admin")
+	operatorClient := e.loginAs("operator1")
+	admin2Client := e.loginAs("admin2")
+
+	code, body := e.req(operatorClient, "GET", "/api/admin/users", nil)
+	if code != http.StatusOK {
+		t.Fatalf("operator should view users: %d %s", code, body)
+	}
+	if code, _ := e.req(operatorClient, "POST", "/api/admin/users", map[string]string{
+		"username": "blocked", "display_name": "blocked", "password": "blocked-pass-123", "role": "viewer",
+	}); code != http.StatusForbidden {
+		t.Fatalf("operator create user should be forbidden, got %d", code)
+	}
+	if code, _ := e.req(operatorClient, "PATCH", "/api/admin/users/"+operator.ID, map[string]any{
+		"display_name": "operator1", "role": "operator", "disabled": false,
+	}); code != http.StatusForbidden {
+		t.Fatalf("operator update user should be forbidden, got %d", code)
+	}
+	for _, path := range []string{"/api/admin/audit", "/api/recycle", "/api/admin/settings", "/api/admin/system", "/api/admin/backups"} {
+		if code, body := e.req(operatorClient, "GET", path, nil); code != http.StatusOK {
+			t.Fatalf("operator should access %s: %d %s", path, code, body)
+		}
+	}
+	if code, _ := e.req(operatorClient, "POST", "/api/admin/backups/run", nil); code == http.StatusForbidden {
+		t.Fatalf("operator backup route should not be forbidden")
+	}
+	if code, body := e.req(operatorClient, "PUT", "/api/admin/settings", map[string]any{"recycle_retention_days": 30}); code != http.StatusOK {
+		t.Fatalf("operator should save settings: %d %s", code, body)
+	}
+
+	code, body = e.upload(e.admin, "操作员恢复.txt", "operator recycle", "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("upload recycle sample: %d %s", code, body)
+	}
+	recycleNode := decode[uploadResponse](t, body).Node
+	if code, _ := e.req(e.admin, "DELETE", "/api/nodes/"+recycleNode.ID, nil); code != http.StatusOK {
+		t.Fatalf("delete recycle sample: %d", code)
+	}
+	code, body = e.req(operatorClient, "GET", "/api/recycle", nil)
+	recycle := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	var sampleBatch string
+	for _, item := range recycle.Items {
+		if item.ID == recycleNode.ID {
+			sampleBatch = item.DeleteBatch
+		}
+	}
+	if sampleBatch == "" {
+		t.Fatalf("operator should see main recycle item: %s", body)
+	}
+	if code, _ := e.req(operatorClient, "POST", "/api/recycle/"+sampleBatch+"/restore", nil); code != http.StatusOK {
+		t.Fatalf("operator should restore main recycle item: %d", code)
+	}
+	if code, _ := e.req(e.admin, "DELETE", "/api/nodes/"+recycleNode.ID, nil); code != http.StatusOK {
+		t.Fatalf("delete recycle sample again: %d", code)
+	}
+	code, body = e.req(operatorClient, "GET", "/api/recycle", nil)
+	recycle = decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	sampleBatch = ""
+	for _, item := range recycle.Items {
+		if item.ID == recycleNode.ID {
+			sampleBatch = item.DeleteBatch
+		}
+	}
+	if sampleBatch == "" {
+		t.Fatalf("operator should see main recycle item again: %s", body)
+	}
+	if code, _ := e.req(operatorClient, "DELETE", "/api/recycle/"+sampleBatch, nil); code != http.StatusOK {
+		t.Fatalf("operator should purge main recycle item: %d", code)
+	}
+
+	code, body = e.req(admin2Client, "POST", "/api/admin/users", map[string]string{
+		"username": "operator2", "display_name": "operator2", "password": "pass-operator2-123", "role": "operator",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("admin should create operator: %d %s", code, body)
+	}
+	operator2 := decode[model.User](t, body)
+
+	code, body = e.req(admin2Client, "POST", "/api/admin/users", map[string]string{
+		"username": "admin3", "display_name": "admin3", "password": "pass-admin3-123", "role": "admin",
+	})
+	if code != http.StatusForbidden || decode[errorPayload](t, body).Error.Code != "ADMIN_ASSIGN_FORBIDDEN" {
+		t.Fatalf("admin should not create admin: %d %s", code, body)
+	}
+	code, body = e.req(admin2Client, "PATCH", "/api/admin/users/"+operator2.ID, map[string]any{
+		"display_name": "operator2", "role": "admin", "disabled": false,
+	})
+	if code != http.StatusForbidden || decode[errorPayload](t, body).Error.Code != "ADMIN_ASSIGN_FORBIDDEN" {
+		t.Fatalf("admin should not promote operator to admin: %d %s", code, body)
+	}
+
+	code, body = e.req(e.admin, "PATCH", "/api/admin/users/"+operator2.ID, map[string]any{
+		"display_name": "operator2", "role": "admin", "disabled": false,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("owner should promote operator to admin: %d %s", code, body)
+	}
+	if admin2.ID == "" {
+		t.Fatal("admin2 missing")
+	}
+}
+
+func TestSecureZoneVisibilityAndAccess(t *testing.T) {
+	e := newEnv(t)
+	e.setupAdmin()
+	op1 := e.createUserAs(e.admin, "op1", "operator")
+	_ = e.createUserAs(e.admin, "op2", "operator")
+	_ = e.createUserAs(e.admin, "ed1", "editor")
+	viewer := e.createUserAs(e.admin, "vi1", "viewer")
+	_ = e.createUserAs(e.admin, "ad2", "admin")
+	op1Client := e.loginAs("op1")
+	op2Client := e.loginAs("op2")
+	edClient := e.loginAs("ed1")
+	viewerClient := e.loginAs("vi1")
+	admin2Client := e.loginAs("ad2")
+
+	code, body := e.req(e.admin, "GET", "/api/folders/tree", nil)
+	if code != http.StatusOK {
+		t.Fatalf("folder tree: %d %s", code, body)
+	}
+	tree := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	var secureRoot files.Node
+	for _, item := range tree.Items {
+		if item.IsZoneRoot && item.Space == model.SpaceSecure {
+			secureRoot = item
+			break
+		}
+	}
+	if secureRoot.ID == "" {
+		t.Fatalf("secure root missing: %+v", tree.Items)
+	}
+
+	code, body = e.req(op1Client, "POST", "/api/nodes", map[string]string{
+		"parent_id": secureRoot.ID, "name": "共享",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("operator create secure folder: %d %s", code, body)
+	}
+	folder := decode[files.Node](t, body)
+
+	code, body = e.uploadSecure(op1Client, "默认.txt", "default-content", folder.ID, "default", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("default secure upload: %d %s", code, body)
+	}
+	defaultUpload := decode[uploadResponse](t, body)
+
+	code, body = e.uploadSecure(op1Client, "指定.txt", "custom-content", folder.ID, "custom",
+		[]string{model.RoleEditor}, []string{viewer.ID})
+	if code != http.StatusOK {
+		t.Fatalf("custom secure upload: %d %s", code, body)
+	}
+	customUpload := decode[uploadResponse](t, body)
+
+	ownerNames := e.listNames(e.admin, folder.ID)
+	if !ownerNames["默认.txt"] || !ownerNames["指定.txt"] {
+		t.Fatalf("owner should see secure files: %+v", ownerNames)
+	}
+	adminNames := e.listNames(admin2Client, folder.ID)
+	if !adminNames["默认.txt"] || adminNames["指定.txt"] {
+		t.Fatalf("admin2 should only see the default hierarchy file: %+v", adminNames)
+	}
+	for name, client := range map[string]*http.Client{
+		"operator2": op2Client, "editor": edClient, "viewer": viewerClient,
+	} {
+		names := e.listNames(client, folder.ID)
+		if names["默认.txt"] {
+			t.Fatalf("%s should not see default secure file: %+v", name, names)
+		}
+	}
+	if !e.listNames(edClient, folder.ID)["指定.txt"] || !e.listNames(viewerClient, folder.ID)["指定.txt"] {
+		t.Fatalf("explicit editor/viewer visibility missing")
+	}
+	if e.listNames(admin2Client, folder.ID)["指定.txt"] || e.listNames(op2Client, folder.ID)["指定.txt"] {
+		t.Fatalf("custom file leaked to unselected accounts")
+	}
+
+	if code, _ := e.download(admin2Client, customUpload.Node.ID, ""); code != http.StatusNotFound {
+		t.Fatalf("hidden secure file download should be 404, got %d", code)
+	}
+	if code, body := e.download(edClient, customUpload.Node.ID, ""); code != http.StatusOK || string(body) != "custom-content" {
+		t.Fatalf("explicit secure download failed: %d %q", code, body)
+	}
+	if res, body := e.preview(edClient, customUpload.Node.ID, ""); res.StatusCode != http.StatusOK || string(body) != "custom-content" ||
+		res.Header.Get("Content-Type") != "text/plain; charset=utf-8" || res.Header.Get("Cache-Control") != "private, no-store, max-age=0" {
+		t.Fatalf("explicit secure preview failed: %d %q %+v", res.StatusCode, body, res.Header)
+	}
+	if res, _ := e.preview(admin2Client, customUpload.Node.ID, ""); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("hidden secure preview should be 404, got %d", res.StatusCode)
+	}
+	if code, _ := e.download(op2Client, defaultUpload.Node.ID, ""); code != http.StatusNotFound {
+		t.Fatalf("same-level default file should be hidden, got %d", code)
+	}
+
+	code, body = e.req(op1Client, "GET", "/api/nodes/"+customUpload.Node.ID+"/visibility", nil)
+	if code != http.StatusOK {
+		t.Fatalf("uploader visibility: %d %s", code, body)
+	}
+	vis := decode[files.VisibilityInfo](t, body)
+	if vis.Mode != "custom" || len(vis.Roles) != 1 || vis.Roles[0] != model.RoleEditor || len(vis.Users) != 1 || vis.Users[0].ID != viewer.ID {
+		t.Fatalf("unexpected visibility: %+v", vis)
+	}
+	if code, _ := e.req(edClient, "GET", "/api/nodes/"+customUpload.Node.ID+"/visibility", nil); code != http.StatusForbidden {
+		t.Fatalf("editor should not read visibility details, got %d", code)
+	}
+	if code, _ := e.req(edClient, "PUT", "/api/nodes/"+customUpload.Node.ID+"/visibility", map[string]any{
+		"mode": "default", "roles": []string{}, "users": []string{},
+	}); code != http.StatusForbidden {
+		t.Fatalf("editor should not modify visibility, got %d", code)
+	}
+
+	code, body = e.upload(op1Client, "指定.txt", "custom-v2", "", customUpload.Node.ID, customUpload.Node.CurrentVersionID)
+	if code != http.StatusOK {
+		t.Fatalf("secure new version: %d %s", code, body)
+	}
+	v2 := decode[uploadResponse](t, body)
+	if code, body := e.download(edClient, customUpload.Node.ID, ""); code != http.StatusOK || string(body) != "custom-v2" {
+		t.Fatalf("new version should keep visibility: %d %q", code, body)
+	}
+	if code, _ := e.download(admin2Client, customUpload.Node.ID, ""); code != http.StatusNotFound {
+		t.Fatalf("new version leaked to admin: %d", code)
+	}
+	_ = v2
+
+	code, body = e.req(e.admin, "GET", "/api/nodes/"+folder.ID+"/download-folder", nil)
+	if code != http.StatusOK || !bytes.Contains(body, []byte("默认.txt")) || !bytes.Contains(body, []byte("指定.txt")) {
+		t.Fatalf("owner folder zip missing files: %d", code)
+	}
+	code, body = e.req(edClient, "GET", "/api/nodes/"+folder.ID+"/download-folder", nil)
+	if code != http.StatusOK || bytes.Contains(body, []byte("默认.txt")) || !bytes.Contains(body, []byte("指定.txt")) {
+		t.Fatalf("editor folder zip filtering failed: %d", code)
+	}
+	code, body = e.req(op2Client, "GET", "/api/nodes/"+folder.ID+"/download-folder", nil)
+	if code != http.StatusOK || bytes.Contains(body, []byte(".txt")) {
+		t.Fatalf("operator2 folder zip should not contain files: %d", code)
+	}
+
+	code, body = e.req(op2Client, "GET", "/api/nodes?q="+url.QueryEscape("指定"), nil)
+	search := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	if code != http.StatusOK {
+		t.Fatalf("search operator2: %d %s", code, body)
+	}
+	for _, item := range search.Items {
+		if item.ID == customUpload.Node.ID {
+			t.Fatalf("hidden custom file appeared in search")
+		}
+	}
+	code, body = e.req(edClient, "GET", "/api/nodes?q="+url.QueryEscape("指定"), nil)
+	search = decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	found := false
+	for _, item := range search.Items {
+		if item.ID == customUpload.Node.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("visible custom file missing from search: %s", body)
+	}
+
+	code, body = e.req(op1Client, "PUT", "/api/nodes/"+customUpload.Node.ID+"/visibility", map[string]any{
+		"mode": "custom", "roles": []string{model.RoleViewer}, "users": []string{},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("update visibility: %d %s", code, body)
+	}
+	if e.listNames(edClient, folder.ID)["指定.txt"] {
+		t.Fatalf("editor should lose access after visibility update")
+	}
+	if !e.listNames(viewerClient, folder.ID)["指定.txt"] {
+		t.Fatalf("viewer should gain access by role group")
+	}
+	if res, _ := e.preview(edClient, customUpload.Node.ID, ""); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("old preview URL should fail after visibility revoke, got %d", res.StatusCode)
+	}
+	if res, body := e.preview(viewerClient, customUpload.Node.ID, ""); res.StatusCode != http.StatusOK || string(body) != "custom-v2" {
+		t.Fatalf("newly visible viewer preview failed: %d %q", res.StatusCode, body)
+	}
+	code, body = e.req(viewerClient, "GET", "/api/nodes?parent="+url.QueryEscape(folder.ID), nil)
+	viewerPage := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	viewerCanDelete := false
+	for _, item := range viewerPage.Items {
+		if item.ID == customUpload.Node.ID {
+			viewerCanDelete = item.CanDelete
+		}
+	}
+	if code != http.StatusOK || !viewerCanDelete {
+		t.Fatalf("visible secure file should expose delete permission: %d %+v", code, viewerPage.Items)
+	}
+
+	if code, _ := e.req(edClient, "DELETE", "/api/nodes/"+customUpload.Node.ID, nil); code != http.StatusNotFound {
+		t.Fatalf("editor secure delete should be hidden, got %d", code)
+	}
+	if code, _ := e.req(op1Client, "DELETE", "/api/nodes/"+folder.ID, nil); code != http.StatusForbidden {
+		t.Fatalf("operator secure folder delete should be host-only, got %d", code)
+	}
+	if code, _ := e.req(op1Client, "PATCH", "/api/nodes/"+folder.ID, map[string]string{"name": "改名"}); code != http.StatusForbidden {
+		t.Fatalf("operator secure folder rename should be forbidden, got %d", code)
+	}
+	if code, _ := e.req(e.admin, "PATCH", "/api/nodes/"+secureRoot.ID, map[string]string{"name": "改名"}); code != http.StatusForbidden {
+		t.Fatalf("secure root rename should be forbidden, got %d", code)
+	}
+	if code, _ := e.req(e.admin, "DELETE", "/api/nodes/"+secureRoot.ID, nil); code != http.StatusForbidden {
+		t.Fatalf("secure root delete should be forbidden, got %d", code)
+	}
+	code, body = e.req(e.admin, "PATCH", "/api/nodes/"+customUpload.Node.ID, map[string]string{"parent_id": ""})
+	if code != http.StatusBadRequest || decode[errorPayload](t, body).Error.Code != "CROSS_SPACE_MOVE" {
+		t.Fatalf("cross-space move should fail: %d %s", code, body)
+	}
+	code, body = e.req(e.admin, "PATCH", "/api/nodes/"+folder.ID, map[string]string{"name": "改为共享二"})
+	if code != http.StatusOK {
+		t.Fatalf("owner secure folder rename: %d %s", code, body)
+	}
+
+	if code, _ := e.req(op1Client, "GET", "/api/nodes/"+customUpload.Node.ID+"/audit", nil); code != http.StatusOK {
+		t.Fatalf("uploader should see node audit, got %d", code)
+	}
+	if code, _ := e.req(edClient, "GET", "/api/nodes/"+customUpload.Node.ID+"/audit", nil); code != http.StatusNotFound {
+		t.Fatalf("editor should lose node audit after visibility update, got %d", code)
+	}
+	code, body = e.req(admin2Client, "GET", "/api/admin/audit?q="+url.QueryEscape("指定"), nil)
+	adminAudit := decode[struct {
+		Total int `json:"total"`
+	}](t, body)
+	if code != http.StatusOK || adminAudit.Total != 0 {
+		t.Fatalf("admin audit should hide secure entries: %d %+v", code, adminAudit)
+	}
+	code, body = e.req(op1Client, "GET", "/api/admin/audit?q="+url.QueryEscape("指定"), nil)
+	operatorAudit := decode[struct {
+		Total int `json:"total"`
+	}](t, body)
+	if code != http.StatusOK || operatorAudit.Total != 0 {
+		t.Fatalf("operator audit should hide secure entries: %d %+v", code, operatorAudit)
+	}
+	code, body = e.req(e.admin, "GET", "/api/admin/audit?q="+url.QueryEscape("指定"), nil)
+	ownerAudit := decode[struct {
+		Total int `json:"total"`
+	}](t, body)
+	if code != http.StatusOK || ownerAudit.Total == 0 {
+		t.Fatalf("owner audit should include secure entries: %d %+v", code, ownerAudit)
+	}
+
+	code, body = e.req(viewerClient, "DELETE", "/api/nodes/"+customUpload.Node.ID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("visible user secure delete: %d %s", code, body)
+	}
+	if res, _ := e.preview(viewerClient, customUpload.Node.ID, ""); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("preview should fail after deletion, got %d", res.StatusCode)
+	}
+	code, body = e.req(admin2Client, "GET", "/api/recycle", nil)
+	adminRecycle := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	for _, item := range adminRecycle.Items {
+		if item.ID == customUpload.Node.ID {
+			t.Fatalf("secure recycle item leaked to admin")
+		}
+	}
+	code, body = e.req(op1Client, "GET", "/api/recycle", nil)
+	operatorRecycle := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	for _, item := range operatorRecycle.Items {
+		if item.ID == customUpload.Node.ID {
+			t.Fatalf("secure recycle item leaked to operator")
+		}
+	}
+	code, body = e.req(e.admin, "GET", "/api/recycle", nil)
+	ownerRecycle := decode[struct {
+		Items []files.Node `json:"items"`
+	}](t, body)
+	if code != http.StatusOK {
+		t.Fatalf("owner recycle: %d %s", code, body)
+	}
+	var batch string
+	for _, item := range ownerRecycle.Items {
+		if item.ID == customUpload.Node.ID {
+			batch = item.DeleteBatch
+		}
+	}
+	if batch == "" {
+		t.Fatalf("secure file missing from owner recycle: %+v", ownerRecycle.Items)
+	}
+	if code, _ := e.req(e.admin, "POST", "/api/recycle/"+batch+"/restore", nil); code != http.StatusOK {
+		t.Fatalf("owner secure restore failed: %d", code)
+	}
+	if code, _ := e.req(edClient, "GET", "/api/visibility/options", nil); code != http.StatusForbidden {
+		t.Fatalf("editor visibility options should be forbidden, got %d", code)
+	}
+	if code, _ := e.req(op1Client, "GET", "/api/visibility/options", nil); code != http.StatusOK {
+		t.Fatalf("operator visibility options should be allowed, got %d", code)
+	}
+	_ = op1
 }
 
 func TestConcurrentVersionConflict(t *testing.T) {

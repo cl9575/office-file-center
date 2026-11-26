@@ -40,6 +40,12 @@ interface ResetForm {
 
 export function AdminUsers({ currentUser }: { currentUser: User }) {
   const { message, modal } = App.useApp()
+  const canManageUsers = currentUser.role === 'admin'
+  const assignableRoles: Role[] = currentUser.is_owner
+    ? ['admin', 'operator', 'editor', 'viewer']
+    : currentUser.role === 'admin'
+      ? ['operator', 'editor', 'viewer']
+      : []
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
@@ -49,6 +55,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
   const [createForm] = Form.useForm<CreateForm>()
   const [editForm] = Form.useForm<EditForm>()
   const [resetForm] = Form.useForm<ResetForm>()
+  const roleOptions = (roles: Role[]) => roles.map((role) => ({ value: role, label: roleLabels[role] }))
 
   async function load() {
     setLoading(true)
@@ -152,6 +159,12 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
     })
   }
 
+  const editRoleOptions = roleOptions(
+    editing?.id === currentUser.id
+      ? (['admin', 'operator', 'editor', 'viewer'] as Role[])
+      : assignableRoles,
+  )
+
   const columns: ColumnsType<User> = [
     {
       title: '账号',
@@ -198,6 +211,9 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
       width: 250,
       render: (_, row) => {
         const isSelf = row.id === currentUser.id
+        if (!canManageUsers) {
+          return <span className="muted">操作员仅可查看</span>
+        }
         if (row.is_owner && !isSelf) {
           return <span className="muted">仅主机账号本人可维护</span>
         }
@@ -234,18 +250,25 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
       <div className="page-heading">
         <div>
           <h1>用户管理</h1>
-          <p>账号由管理员创建。编辑者可以上传和修改文件，只读者只能浏览与下载。</p>
+          <p>管理员维护账号；操作员可进入后台查看账号；编辑者维护文件；只读者浏览和下载。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          新建账号
-        </Button>
+        {canManageUsers && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            新建账号
+          </Button>
+        )}
       </div>
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 18 }}
-        message="角色说明"
-        description="管理员：账号、备份、回收站及全部编辑权限；编辑者：上传、更新、重命名、移动和删除文件；只读者：浏览、搜索、下载与查看历史。所有权限均由服务器校验。任何人都不能修改自己的权限等级；非主机管理员不能编辑或重置同级管理员。主机账号为初始化时创建的账号，只能由本人维护，其他管理员不能修改或重置；主机账号还可以删除其他账号，删除后历史记录保留。"
+        message={
+          !canManageUsers
+            ? '操作员仅可查看账号。'
+            : currentUser.is_owner
+              ? '只有主机账号可以设置管理员。'
+              : '管理员最高可设置操作员。'
+        }
       />
       <Table className="admin-users-table" rowKey="id" columns={columns} dataSource={users} loading={loading} pagination={false} />
 
@@ -274,13 +297,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
             <Input placeholder="例如 张三" maxLength={40} />
           </Form.Item>
           <Form.Item name="role" label="角色" rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: 'editor', label: '编辑者 — 可上传、更新和整理文件' },
-                { value: 'viewer', label: '只读者 — 只能浏览和下载' },
-                { value: 'admin', label: '管理员 — 含账号和系统管理' },
-              ]}
-            />
+            <Select options={roleOptions(assignableRoles)} />
           </Form.Item>
           <Form.Item
             name="password"
@@ -331,11 +348,7 @@ export function AdminUsers({ currentUser }: { currentUser: User }) {
           <Form.Item name="role" label="角色" rules={[{ required: true }]}>
             <Select
               disabled={!!editing?.is_owner || editing?.id === currentUser.id}
-              options={[
-                { value: 'admin', label: '管理员' },
-                { value: 'editor', label: '编辑者' },
-                { value: 'viewer', label: '只读者' },
-              ]}
+              options={editRoleOptions}
             />
           </Form.Item>
           <Form.Item name="disabled" label="停用账号" valuePropName="checked">

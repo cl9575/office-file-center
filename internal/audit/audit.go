@@ -26,6 +26,7 @@ type Event struct {
 	Result     string
 	IP         string
 	At         string
+	Secure     bool
 }
 
 type Row struct {
@@ -42,17 +43,19 @@ type Row struct {
 	Result     string `json:"result"`
 	IP         string `json:"ip"`
 	CreatedAt  string `json:"created_at"`
+	Secure     bool   `json:"secure,omitempty"`
 }
 
 type Filter struct {
-	Actor   string
-	Action  string
-	Result  string
-	Query   string
-	From    string
-	To      string
-	Limit   int
-	Offset  int
+	Actor      string
+	Action     string
+	Result     string
+	Query      string
+	From       string
+	To         string
+	Limit      int
+	Offset     int
+	HideSecure bool
 }
 
 type Service struct {
@@ -74,20 +77,20 @@ func normalize(ev *Event) {
 func (s *Service) Log(ev Event) error {
 	normalize(&ev)
 	_, err := s.DB.Exec(`INSERT INTO audit
-		(id, actor_id, actor_name, action, target_type, target_id, target_name, target_path, detail, result, ip, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, actor_id, actor_name, action, target_type, target_id, target_name, target_path, detail, result, ip, created_at, secure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		model.NewID(), ev.ActorID, ev.ActorName, ev.Action, ev.TargetType, ev.TargetID,
-		ev.TargetName, ev.TargetPath, ev.Detail, ev.Result, ev.IP, ev.At)
+		ev.TargetName, ev.TargetPath, ev.Detail, ev.Result, ev.IP, ev.At, boolInt(ev.Secure))
 	return err
 }
 
 func (s *Service) LogTx(tx *sql.Tx, ev Event) error {
 	normalize(&ev)
 	_, err := tx.Exec(`INSERT INTO audit
-		(id, actor_id, actor_name, action, target_type, target_id, target_name, target_path, detail, result, ip, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, actor_id, actor_name, action, target_type, target_id, target_name, target_path, detail, result, ip, created_at, secure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		model.NewID(), ev.ActorID, ev.ActorName, ev.Action, ev.TargetType, ev.TargetID,
-		ev.TargetName, ev.TargetPath, ev.Detail, ev.Result, ev.IP, ev.At)
+		ev.TargetName, ev.TargetPath, ev.Detail, ev.Result, ev.IP, ev.At, boolInt(ev.Secure))
 	return err
 }
 
@@ -119,6 +122,9 @@ func (f Filter) where() (string, []any) {
 		parts = append(parts, "created_at <= ?")
 		args = append(args, f.To)
 	}
+	if f.HideSecure {
+		parts = append(parts, "secure = 0")
+	}
 	if len(parts) == 0 {
 		return "", args
 	}
@@ -142,7 +148,7 @@ func (s *Service) List(f Filter) ([]Row, int, error) {
 		return nil, 0, err
 	}
 	query := fmt.Sprintf(`SELECT seq, id, actor_id, actor_name, action, target_type, target_id,
-		target_name, target_path, detail, result, ip, created_at FROM audit %s
+		target_name, target_path, detail, result, ip, created_at, secure FROM audit %s
 		ORDER BY seq DESC LIMIT ? OFFSET ?`, where)
 	rows, err := s.DB.Query(query, append(args, f.Limit, f.Offset)...)
 	if err != nil {
@@ -152,11 +158,13 @@ func (s *Service) List(f Filter) ([]Row, int, error) {
 	out := make([]Row, 0, f.Limit)
 	for rows.Next() {
 		var row Row
+		var secure int
 		if err := rows.Scan(&row.Seq, &row.ID, &row.ActorID, &row.ActorName, &row.Action,
 			&row.TargetType, &row.TargetID, &row.TargetName, &row.TargetPath, &row.Detail,
-			&row.Result, &row.IP, &row.CreatedAt); err != nil {
+			&row.Result, &row.IP, &row.CreatedAt, &secure); err != nil {
 			return nil, 0, err
 		}
+		row.Secure = secure == 1
 		out = append(out, row)
 	}
 	return out, total, rows.Err()
@@ -168,7 +176,7 @@ func (s *Service) All(f Filter, max int) ([]Row, error) {
 	}
 	where, args := f.where()
 	query := fmt.Sprintf(`SELECT seq, id, actor_id, actor_name, action, target_type, target_id,
-		target_name, target_path, detail, result, ip, created_at FROM audit %s
+		target_name, target_path, detail, result, ip, created_at, secure FROM audit %s
 		ORDER BY seq DESC LIMIT ?`, where)
 	rows, err := s.DB.Query(query, append(args, max)...)
 	if err != nil {
@@ -178,11 +186,13 @@ func (s *Service) All(f Filter, max int) ([]Row, error) {
 	out := []Row{}
 	for rows.Next() {
 		var row Row
+		var secure int
 		if err := rows.Scan(&row.Seq, &row.ID, &row.ActorID, &row.ActorName, &row.Action,
 			&row.TargetType, &row.TargetID, &row.TargetName, &row.TargetPath, &row.Detail,
-			&row.Result, &row.IP, &row.CreatedAt); err != nil {
+			&row.Result, &row.IP, &row.CreatedAt, &secure); err != nil {
 			return nil, err
 		}
+		row.Secure = secure == 1
 		out = append(out, row)
 	}
 	return out, rows.Err()
@@ -193,7 +203,7 @@ func (s *Service) ForTarget(targetID string, limit int) ([]Row, error) {
 		limit = 100
 	}
 	rows, err := s.DB.Query(`SELECT seq, id, actor_id, actor_name, action, target_type, target_id,
-		target_name, target_path, detail, result, ip, created_at FROM audit
+		target_name, target_path, detail, result, ip, created_at, secure FROM audit
 		WHERE target_id = ? ORDER BY seq DESC LIMIT ?`, targetID, limit)
 	if err != nil {
 		return nil, err
@@ -202,14 +212,23 @@ func (s *Service) ForTarget(targetID string, limit int) ([]Row, error) {
 	out := []Row{}
 	for rows.Next() {
 		var row Row
+		var secure int
 		if err := rows.Scan(&row.Seq, &row.ID, &row.ActorID, &row.ActorName, &row.Action,
 			&row.TargetType, &row.TargetID, &row.TargetName, &row.TargetPath, &row.Detail,
-			&row.Result, &row.IP, &row.CreatedAt); err != nil {
+			&row.Result, &row.IP, &row.CreatedAt, &secure); err != nil {
 			return nil, err
 		}
+		row.Secure = secure == 1
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func CSVSafe(value string) string {

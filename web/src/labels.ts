@@ -16,12 +16,14 @@ export const actionLabels: Record<string, string> = {
   upload_failed: '上传失败',
   rename: '重命名',
   move: '移动',
+  visibility_update: '修改可见范围',
   delete: '移入回收站',
   recycle_restore: '恢复回收站',
   recycle_purge: '永久删除',
   recycle_purge_all: '清空回收站',
   version_restore: '恢复历史版本',
   version_purge: '清理历史版本',
+  preview: '预览',
   download: '下载',
   download_folder: '下载文件夹',
   settings_update: '修改设置',
@@ -32,12 +34,14 @@ export const actionLabels: Record<string, string> = {
 
 export const roleLabels: Record<string, string> = {
   admin: '管理员',
+  operator: '操作员',
   editor: '编辑者',
   viewer: '只读者',
 }
 
 export const roleColors: Record<string, string> = {
   admin: '#7d6f5a',
+  operator: '#5f7f9f',
   editor: '#3a79bc',
   viewer: 'default',
 }

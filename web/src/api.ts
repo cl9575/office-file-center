@@ -12,6 +12,9 @@ import type {
   UploadResult,
   User,
   VersionItem,
+  VisibilityChoice,
+  VisibilityInfo,
+  VisibilityOptions,
 } from './types'
 
 export class ApiError extends Error {
@@ -109,6 +112,15 @@ export const api = {
       method: 'DELETE',
     }),
 
+  visibility: (id: string) =>
+    request<VisibilityInfo>(`/api/nodes/${encodeURIComponent(id)}/visibility`),
+  setVisibility: (id: string, data: VisibilityChoice) =>
+    request<VisibilityInfo>(`/api/nodes/${encodeURIComponent(id)}/visibility`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  visibilityOptions: () => request<VisibilityOptions>('/api/visibility/options'),
+
   upload: (options: UploadOptions) => uploadFile(options),
   uploadStatus: (id: string) =>
     request<{ upload_id: string; status: string; node_id: string; version_id: string; error: string }>(
@@ -165,6 +177,7 @@ export interface UploadOptions {
   note?: string
   nodeId?: string
   baseVersionId?: string
+  visibility?: VisibilityChoice
   onProgress?: (percent: number) => void
 }
 
@@ -183,6 +196,11 @@ function uploadFile(options: UploadOptions): UploadHandle {
   if (options.note) params.set('note', options.note)
   if (options.nodeId) params.set('node', options.nodeId)
   if (options.baseVersionId) params.set('base', options.baseVersionId)
+  if (options.visibility) {
+    params.set('visibility_mode', options.visibility.mode)
+    if (options.visibility.roles.length) params.set('visibility_roles', options.visibility.roles.join(','))
+    if (options.visibility.users.length) params.set('visibility_users', options.visibility.users.join(','))
+  }
 
   const promise = new Promise<UploadResult>((resolve, reject) => {
     xhr.open('PUT', `/api/upload?${params.toString()}`)
@@ -239,6 +257,10 @@ export function newUploadId(): string {
 
 export function downloadUrl(nodeId: string, versionId?: string): string {
   return `/api/nodes/${encodeURIComponent(nodeId)}/download${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`
+}
+
+export function previewUrl(nodeId: string): string {
+  return `/api/nodes/${encodeURIComponent(nodeId)}/preview`
 }
 
 export function folderDownloadUrl(nodeId: string): string {

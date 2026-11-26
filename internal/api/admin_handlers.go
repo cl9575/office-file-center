@@ -22,7 +22,7 @@ import (
 )
 
 func (s *Server) handleListRecycle(w http.ResponseWriter, r *http.Request, user model.User) {
-	items, err := s.Files.ListRecycle()
+	items, err := s.Files.ListRecycle(actorOf(user, r))
 	if err != nil {
 		s.writeErr(w, r, err)
 		return
@@ -181,6 +181,7 @@ func auditFilter(r *http.Request) audit.Filter {
 
 func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request, user model.User) {
 	f := auditFilter(r)
+	f.HideSecure = !user.IsOwner
 	rows, total, err := s.Audit.List(f)
 	if err != nil {
 		s.writeErr(w, r, err)
@@ -212,6 +213,7 @@ func actionLabel(action string) string {
 
 func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request, user model.User) {
 	f := auditFilter(r)
+	f.HideSecure = !user.IsOwner
 	rows, err := s.Audit.All(f, 10000)
 	if err != nil {
 		s.writeErr(w, r, err)

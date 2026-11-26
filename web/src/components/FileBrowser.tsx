@@ -25,6 +25,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   AudioOutlined,
   CodeOutlined,
   FileExcelOutlined,
@@ -46,12 +47,14 @@ import {
   UploadOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
-import { api, ApiError, downloadUrl, folderDownloadUrl, formatBytes } from '../api'
-import type { Breadcrumb as Crumb, NodeItem, PublicSettings, UploadResult, User } from '../types'
+import { api, ApiError, downloadUrl, folderDownloadUrl, formatBytes, previewUrl } from '../api'
+import type { Breadcrumb as Crumb, NodeItem, NodeSpace, PublicSettings, UploadResult, User } from '../types'
 import { fmtTime } from '../labels'
+import { previewKindForName } from '../preview'
 import { Uploader, type UploaderHandle } from './Uploader'
 import { DetailsDrawer } from './DetailsDrawer'
 import { ContextMenu, type ContextMenuState } from './ContextMenu'
+import { PreviewModal } from './PreviewModal'
 
 const { Text } = Typography
 
@@ -59,15 +62,19 @@ interface MoveTreeNode {
   title: string
   fullPath: string
   value: string
+  selectable?: boolean
   children: MoveTreeNode[]
 }
 
-function movePathLabel(path?: string) {
+function movePathLabel(path: string | undefined, space: NodeSpace) {
   const parts = (path || '').split('/').filter(Boolean)
+  if (space === 'secure') {
+    return parts.length ? parts.join(' / ') : '权限区'
+  }
   return parts.length ? `全部项目 / ${parts.join(' / ')}` : '全部项目'
 }
 
-function moveExpandedKeys(folders: NodeItem[], parentId: string) {
+function moveExpandedKeys(folders: NodeItem[], parentId: string, rootKey: string) {
   const byId = new Map(folders.map((folder) => [folder.id, folder]))
   const chain: string[] = []
   const seen = new Set<string>()
@@ -77,7 +84,7 @@ function moveExpandedKeys(folders: NodeItem[], parentId: string) {
     chain.push(current)
     current = byId.get(current)?.parent_id || ''
   }
-  return ['__root__', ...chain.reverse()]
+  return [rootKey, ...chain.reverse()]
 }
 
 export interface FileBrowserHandle {
@@ -100,6 +107,13 @@ const codeExts = new Set([
   'c', 'h', 'cpp', 'hpp', 'cxx', 'py', 'js', 'jsx', 'ts', 'tsx', 'json', 'xml', 'yml', 'yaml',
   'html', 'htm', 'css', 'scss', 'sql', 'sh', 'bat', 'ps1', 'go', 'java', 'cs', 'php', 'rb', 'rs', 'vue',
 ])
+
+function splitRenameName(name: string, kind: NodeItem['kind']) {
+  if (kind !== 'file') return { base: name, ext: '' }
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return { base: name, ext: '' }
+  return { base: name.slice(0, dot), ext: name.slice(dot) }
+}
 
 function fileIcon(name: string) {
   const dot = name.lastIndexOf('.')
@@ -139,7 +153,8 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
 }, ref) {
   const { message, modal } = App.useApp()
   const [items, setItems] = useState<NodeItem[]>([])
-  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: '', name: '全部项目' }])
+  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: '', name: '全部项目', space: 'main' }])
+  const [currentSpace, setCurrentSpace] = useState<NodeSpace>('main')
   const [loading, setLoading] = useState(true)
   const [drawerNode, setDrawerNode] = useState<NodeItem | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -148,18 +163,22 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
   const [newFolderName, setNewFolderName] = useState('')
   const [renameTarget, setRenameTarget] = useState<NodeItem | null>(null)
   const [renameName, setRenameName] = useState('')
+  const [renameExt, setRenameExt] = useState('')
   const [moveTarget, setMoveTarget] = useState<NodeItem | null>(null)
   const [moveParent, setMoveParent] = useState('')
   const [moveFolders, setMoveFolders] = useState<NodeItem[]>([])
   const [moveFoldersReady, setMoveFoldersReady] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [previewNode, setPreviewNode] = useState<NodeItem | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const uploaderRef = useRef<UploaderHandle>(null)
   const dragDepth = useRef(0)
   const handledNewFolder = useRef(newFolderSignal)
   const refreshTimer = useRef<number | null>(null)
 
-  const canEdit = user.role === 'admin' || user.role === 'editor'
+  const canEdit = user.role === 'admin' || user.role === 'operator' || user.role === 'editor'
+  const canUploadSecure = user.role === 'admin' || user.role === 'operator'
+  const canWriteHere = currentSpace === 'secure' ? canUploadSecure : canEdit
   const searching = !!searchQuery.trim()
 
   const load = useCallback(async () => {
@@ -168,14 +187,17 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
       if (searching) {
         const list = await api.listNodes('', searchQuery.trim())
         setItems(list)
-        setCrumbs([{ id: '', name: '全部项目' }])
+        setCrumbs([{ id: '', name: '全部项目', space: 'main' }])
       } else {
         const [list, trail] = await Promise.all([
           api.listNodes(folderId, ''),
-          folderId ? api.breadcrumbs(folderId) : Promise.resolve([{ id: '', name: '全部项目' }]),
+          folderId
+            ? api.breadcrumbs(folderId)
+            : Promise.resolve([{ id: '', name: '全部项目', space: 'main' as NodeSpace }]),
         ])
         setItems(list)
         setCrumbs(trail)
+        setCurrentSpace(trail[0]?.space || 'main')
       }
     } catch (err) {
       if (err instanceof ApiError) {
@@ -206,6 +228,21 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     setDrawerOpen(true)
   }
 
+  function openPreview(node: NodeItem) {
+    const kind = previewKindForName(node.name)
+    if (node.kind !== 'file' || !kind) return
+    if (kind === 'pdf') {
+      const tab = window.open(previewUrl(node.id), '_blank')
+      if (!tab) {
+        message.warning('浏览器拦截了新标签页，请允许后重试')
+        return
+      }
+      tab.opener = null
+      return
+    }
+    setPreviewNode(node)
+  }
+
   async function createFolder() {
     const atRoot = !folderId
     const name = newFolderName.trim()
@@ -230,11 +267,12 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
 
   async function renameNode() {
     if (!renameTarget) return
-    const name = renameName.trim()
-    if (!name) {
+    const base = renameName.trim()
+    if (!base) {
       message.error('名称不能为空')
       return
     }
+    const name = base + renameExt
     if (name === renameTarget.name) {
       setRenameTarget(null)
       return
@@ -251,6 +289,13 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     } finally {
       setSaving(false)
     }
+  }
+
+  function openRename(node: NodeItem) {
+    const { base, ext } = splitRenameName(node.name, node.kind)
+    setRenameTarget(node)
+    setRenameName(base)
+    setRenameExt(ext)
   }
 
   function openMove(node: NodeItem) {
@@ -290,9 +335,11 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     modal.confirm({
       title: `将「${node.name}」移入回收站？`,
       content:
-        node.kind === 'folder'
-          ? '文件夹内的所有子目录、文件和历史版本会一并进入回收站，可由管理员恢复。'
-          : '文件及其历史版本会进入回收站，可由管理员恢复。',
+        node.space === 'secure'
+          ? '项目及其历史版本会进入回收站，仅主机账号可恢复。'
+          : node.kind === 'folder'
+            ? '文件夹内的所有子目录、文件和历史版本会一并进入回收站，可由管理员恢复。'
+            : '文件及其历史版本会进入回收站，可由管理员恢复。',
       okText: '移入回收站',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -319,10 +366,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
   }
 
   useImperativeHandle(ref, () => ({
-    rename: (node) => {
-      setRenameTarget(node)
-      setRenameName(node.name)
-    },
+    rename: openRename,
     move: openMove,
     remove: confirmDelete,
     pickFiles: () => uploaderRef.current?.pickFiles(),
@@ -335,6 +379,9 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
       { type: 'divider' },
     ]
     if (row.kind === 'file') {
+      if (previewKindForName(row.name)) {
+        items.push({ key: 'preview', label: '预览', icon: <EyeOutlined /> })
+      }
       items.push(
         { key: 'download', label: '下载当前版本', icon: <DownloadOutlined /> },
         { key: 'history', label: '历史版本与记录', icon: <HistoryOutlined /> },
@@ -344,14 +391,22 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         { key: 'download-folder', label: '下载文件夹（ZIP）', icon: <DownloadOutlined /> },
       )
     }
-    if (canEdit) {
-      items.push(
-        { type: 'divider' },
-        { key: 'rename', label: '重命名', icon: <EditOutlined /> },
-        { key: 'move', label: '移动到…', icon: <SwapOutlined /> },
-        { type: 'divider' },
-        { key: 'delete', label: '移入回收站', icon: <DeleteOutlined />, danger: true },
-      )
+    const rowCanManage = row.space === 'secure' ? !!row.can_manage : canEdit
+    const rowCanDelete = row.space === 'secure' ? !!row.can_delete : canEdit
+    if (rowCanManage || rowCanDelete) {
+      items.push({ type: 'divider' })
+      if (rowCanManage) {
+        items.push(
+          { key: 'rename', label: '重命名', icon: <EditOutlined /> },
+          { key: 'move', label: '移动到…', icon: <SwapOutlined /> },
+        )
+      }
+      if (rowCanDelete) {
+        items.push(
+          { type: 'divider' },
+          { key: 'delete', label: '移入回收站', icon: <DeleteOutlined />, danger: true },
+        )
+      }
     }
     return items
   }
@@ -397,6 +452,9 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
       case 'copy-name':
         void copyName(row.name)
         break
+      case 'preview':
+        openPreview(row)
+        break
       case 'download':
         window.location.href = downloadUrl(row.id)
         break
@@ -408,8 +466,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         window.location.href = folderDownloadUrl(row.id)
         break
       case 'rename':
-        setRenameTarget(row)
-        setRenameName(row.name)
+        openRename(row)
         break
       case 'move':
         openMove(row)
@@ -433,7 +490,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
 
   function areaMenuItems(): MenuProps['items'] {
     const items: MenuProps['items'] = []
-    if (canEdit && !searching) {
+    if (canWriteHere && !searching) {
       items.push(
         { key: 'new-node', label: folderId ? '新建文件夹' : '新建项目', icon: <FolderAddOutlined /> },
         { key: 'upload', label: '上传文件', icon: <UploadOutlined /> },
@@ -468,8 +525,14 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     })
   }
 
+  const moveSecureRoot = useMemo(
+    () => moveFolders.find((folder) => folder.space === 'secure' && folder.is_zone_root) || null,
+    [moveFolders],
+  )
+
   const moveTreeData = useMemo(() => {
     if (!moveTarget) return []
+    const space = moveTarget.space
     const blocked = new Set<string>([moveTarget.id])
     let changed = true
     while (changed) {
@@ -483,7 +546,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     }
     const byParent = new Map<string, NodeItem[]>()
     moveFolders.forEach((folder) => {
-      if (blocked.has(folder.id)) return
+      if (blocked.has(folder.id) || folder.space !== space || folder.is_zone_root) return
       const list = byParent.get(folder.parent_id) || []
       list.push(folder)
       byParent.set(folder.parent_id, list)
@@ -491,24 +554,40 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     const build = (parent: string): MoveTreeNode[] =>
       (byParent.get(parent) || []).map((folder) => ({
         title: folder.name,
-        fullPath: movePathLabel(folder.path),
+        fullPath: movePathLabel(folder.path, space),
         value: folder.id,
         children: build(folder.id),
       }))
+    if (space === 'secure') {
+      if (!moveSecureRoot) return []
+      return [
+        {
+          title: '权限区（根目录）',
+          fullPath: '权限区',
+          value: moveSecureRoot.id,
+          children: build(moveSecureRoot.id),
+        },
+      ]
+    }
     return [{ title: '全部项目（根目录）', fullPath: '全部项目', value: '__root__', children: build('') }]
-  }, [moveFolders, moveTarget])
+  }, [moveFolders, moveTarget, moveSecureRoot])
 
   const moveInitialExpandedKeys = useMemo(
-    () => moveExpandedKeys(moveFolders, moveTarget?.parent_id || ''),
-    [moveFolders, moveTarget],
+    () =>
+      moveExpandedKeys(
+        moveFolders,
+        moveTarget?.parent_id || '',
+        moveTarget?.space === 'secure' && moveSecureRoot ? moveSecureRoot.id : '__root__',
+      ),
+    [moveFolders, moveTarget, moveSecureRoot],
   )
 
   const crumbItems: BreadcrumbProps['items'] = crumbs.map((crumb, index) => ({
     title:
       index === crumbs.length - 1 ? (
-        <span>{index === 0 ? '全部项目' : crumb.name}</span>
+        <span>{crumb.name}</span>
       ) : (
-        <a onClick={() => onFolderChange(crumb.id)}>{index === 0 ? '全部项目' : crumb.name}</a>
+        <a onClick={() => onFolderChange(crumb.id)}>{crumb.name}</a>
       ),
   }))
 
@@ -583,7 +662,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
     {
       title: '',
       key: 'actions',
-      width: 96,
+      width: 128,
       fixed: 'right',
       render: (_, row) => {
         const items = rowMenuItems(row)
@@ -612,6 +691,18 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
             >
               <Button type="text" icon={<MoreOutlined />} />
             </Dropdown>
+            {row.kind === 'file' && previewKindForName(row.name) && (
+              <Tooltip title="预览">
+                <Button
+                  type="text"
+                  icon={<EyeOutlined />}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    openPreview(row)
+                  }}
+                />
+              </Tooltip>
+            )}
           </Space>
         )
       },
@@ -623,13 +714,13 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
       className={`file-browser ${dragOver ? 'drag-over' : ''}`}
       onContextMenu={openAreaMenu}
       onDragEnter={(event) => {
-        if (!canEdit || searching) return
+        if (!canWriteHere || searching) return
         event.preventDefault()
         dragDepth.current += 1
         setDragOver(true)
       }}
       onDragOver={(event) => {
-        if (!canEdit || searching) return
+        if (!canWriteHere || searching) return
         event.preventDefault()
       }}
       onDragLeave={() => {
@@ -640,7 +731,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         event.preventDefault()
         dragDepth.current = 0
         setDragOver(false)
-        if (!canEdit || searching) return
+        if (!canWriteHere || searching) return
         uploaderRef.current?.enqueueDrop(event.dataTransfer)
       }}
     >
@@ -677,7 +768,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
           )}
         </div>
         <Space wrap>
-          {canEdit && !searching && (
+          {canWriteHere && !searching && (
             <>
               <Button icon={<FolderAddOutlined />} onClick={() => setNewFolderOpen(true)}>
                 {folderId ? '新建文件夹' : '新建项目'}
@@ -686,6 +777,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
                 ref={uploaderRef}
                 folderId={folderId}
                 maxFileSize={settings.max_file_size}
+                secure={currentSpace === 'secure'}
                 onUploaded={handleUploaded}
                 onRefresh={() => void load()}
               />
@@ -718,7 +810,7 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
                   description={
                     searching
                       ? '没有找到匹配的文件或文件夹'
-                      : canEdit
+                      : canWriteHere
                         ? '这里还没有文件，拖入文件或点击“上传文件”开始'
                         : '这个文件夹还没有文件'
                   }
@@ -734,11 +826,14 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         open={drawerOpen}
         user={user}
         onClose={() => setDrawerOpen(false)}
+        onPreview={openPreview}
         onChanged={(updated) => {
           if (updated) setDrawerNode(updated)
           void load()
         }}
       />
+
+      <PreviewModal node={previewNode} open={!!previewNode} onClose={() => setPreviewNode(null)} />
 
       <Modal
         title={folderId ? '新建文件夹' : '新建项目'}
@@ -771,7 +866,8 @@ export const FileBrowser = forwardRef<FileBrowserHandle, {
         <Input
           autoFocus
           value={renameName}
-          maxLength={200}
+          maxLength={Math.max(1, 200 - renameExt.length)}
+          addonAfter={renameExt || undefined}
           onChange={(event) => setRenameName(event.target.value)}
           onPressEnter={() => void renameNode()}
         />
